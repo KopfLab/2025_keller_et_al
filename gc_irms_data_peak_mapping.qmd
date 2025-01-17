@@ -1,0 +1,478 @@
+---
+title: "Reading & Mapping IRMS data"
+subtitle: "Katherine Keller's analytical runs"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+number-sections: true
+number-offset: 0
+toc: true
+toc-depth: 3
+df-print: tibble
+embed-resources: true
+output:
+  html: 
+    code-tools: true
+    code-fold: show
+    code-summary: "Show the code"
+    toc-float: true
+knitr: 
+  opts_chunk: 
+    fig.path: "plots/peak_mapping-"
+    fig.keep: "all"
+    dev: ['png', 'pdf']
+    dev.args: 
+      pdf: 
+        encoding: 'WinAnsi'
+        useDingbats: false
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+Using `r R.version.string`, tidyverse version `r packageVersion("tidyverse")`, isoreader version `r packageVersion("isoreader")`, and isoprocessor version `r packageVersion("isoprocessor")`.
+
+```{r}
+#| label: setup
+#| echo: true
+#| message: false
+#| warning: false
+
+# load libraries
+library(tidyverse)
+library(isoreader)
+library(isoprocessor)
+
+# load scripts
+source("scripts/table_functions.R")
+source("scripts/plotting_functions.R")
+```
+
+> Note: the first code block in sections marked with (*) are essential, everything else is additional plotting and/or analysis to explore the data.
+
+# June 2023 session
+
+## Load data files (*)
+
+```{r}
+#| label: load-2023-06
+# iso_files_raw <-
+#   "data/gc_irms_data/2023-06-20_KK_env_BPs_EBay85_PTV_SHK" |>
+#   iso_read_continuous_flow(read_cache = TRUE, parallel = TRUE) |>
+#   iso_save("data/gc_irm_data_2023-06.cf.rds")
+
+iso_files_raw <- 
+  iso_read_continuous_flow("data/gc_irm_data_2023-06.cf.rds") |>
+  # remove files with read errors (usually aborted samples)≈≈
+  iso_filter_files_with_problems() |>
+  # process isodat peak table
+  iso_set_peak_table_from_vendor_data_table(
+    direct_rename = c(peak_nr = "Nr.", is_ref = "Is Ref.?", 
+        rt_start = "Start", rt = "Rt", rt_end = "End", 
+        area = "rIntensity All"),
+    regex_rename = c(
+      `r\\1/\\2` = "^rR (\\d+)[^/]*\\/(\\d+).*$", # ratio values
+       `d\\1` = "^d (\\d+[^/])\\/(\\d+).*$" # delta values
+    )
+  ) |>
+  # convert units from mV to V for amplitudes and area
+  iso_convert_peak_table_units(V = mV, Vs = mVs)
+
+# occasional problems check
+issues <- iso_files_raw |> iso_get_problems() |>
+  filter(str_detect(details, "vendor data table.*empty cells"))
+if (nrow(issues) > 0) {
+  print(issues)
+  cli::cli_abort("the above could be real problems, look into them before proceeding!")
+}
+```
+
+## Process File Information (*)
+
+```{r}
+#| label: process-file-info-2023-06
+# parse file info
+iso_files_w_file_info <- iso_files_raw |>
+  # rename key file info columns
+  iso_rename_file_info(id1 = `Identifier 1`, id2 = `Identifier 2`) |> 
+  # process file information
+  iso_mutate_file_info(
+    # session information
+    session = "2023-06",
+    # analysis as number
+    analysis = as.integer(parse_number(Analysis)),
+    # remove white spaces
+    id1 = str_remove_all(id1, "^ +") |> str_remove_all(" +$"),
+    # what is the type of each analysis?
+    type = case_when(
+      id1 == "H2 zero"                     ~ "on_off",
+      id1 == "H3 F"                        ~ "linearity",
+      str_detect(id1, "A7")                ~ "standard",
+      str_detect(id1, "[Hh][Ee][Xx]")      ~ "blank",
+      str_detect(id1, "S\\d+_(G|Cr)[^_]+") ~ "sample",
+      TRUE                                 ~ "other"
+    ),
+    gc_method = str_extract(`GC Method`, "\\d+min"),
+    # what was the autosampler position?
+    as_pos = str_replace(`AS Sample`, "Trayholder ", "Tray"),
+    # what is the injection volume? infer from AS method
+    injection_volume = str_extract(`AS Method`, "[0-9.]+u[lL] -") |>
+      parse_number() |> iso_double_with_units("uL"),
+    # concentration (only really relevant for standards)
+    concentration = str_extract(Preparation, "[0-9.]+ ?ng( per |/)u[lL]") |> 
+      parse_number() |> iso_double_with_units("ng/uL"),
+    # data folder for info
+    folder = basename(dirname(file_path))
+  ) |>
+  # focus on the file info we want to use
+  iso_select_file_info(
+    session, folder, analysis, file_datetime, id1, id2, type, 
+    gc_method, as_pos, injection_volume, concentration)
+
+```
+
+## First look at chromatograms
+
+```{r}
+#| label: fig-chroms-first-look-2023-06
+#| warning: false
+#| fig-width: 10
+#| fig-height: 8
+# look at specific files for peak mapping purposes
+
+iso_files_w_file_info |> 
+  iso_filter_files(analysis %in% c(13680, 13689, 13693)) |>
+  iso_plot_continuous_flow_data(
+    data = 2,
+    #time_interval = c(1200, 1400),
+    time_interval = c(700, 1400),
+    peak_label = iso_format(peak_nr, rt),
+    panel = sprintf("%s (#%s)", id1, analysis),
+    peak_label_options = list(size = 3)
+  ) +
+  theme(legend.position = "bottom")
+```
+
+## Peak Mapping (*)
+
+```{r}
+#| label: calc-peak-mapping-2023-06
+# sample info and peak maps
+peak_maps <- readxl::read_excel("data/peak_maps_2023-06.xlsx")
+
+iso_files_w_mapped_peaks <- 
+  iso_files_w_file_info |> 
+  iso_filter_files(type %in% c("standard", "sample")) |>
+  # filter out mis-injections (no signal)
+  iso_filter_files(!analysis %in% c(13647, 13663, 13691, 13692)) |>
+  # filter outoverloaded column (e.g. form too much signal)
+  iso_filter_files(!analysis %in% c(13602, 13694)) |>
+  # filter out mis-labeled sample
+  iso_filter_files(id1 != "H2_test2_rep3_-500") |>
+  # map peaks
+  iso_map_peaks(peak_maps, map_id = type)
+
+iso_files_2023 <- iso_files_w_mapped_peaks
+```
+
+## Preview of Peak Mapping
+
+```{r}
+#| label: fig-chroms-2023-06
+#| fig-width: 10
+#| fig-height: 8
+#| warning: false
+
+# whole chrom
+iso_files_w_mapped_peaks |>
+  iso_filter_files(analysis %in% c(13689, 13693)) |>
+  iso_plot_continuous_flow_data(
+    data=c(2,3), color=data, panel=id1,
+    peak_label=iso_format(compound, rt, d2H, signif = 3),
+    time_interval = c(700, 1400),
+    peak_label_filter = !is.na(compound) & data_wo_units == "2" & !is.na(d2H)
+  )
+```
+
+# June 2024 session
+
+## Load data files (*)
+
+```{r}
+#| label: load-2024-06
+# iso_files_raw <-
+#   "data/gc_irms_data/2024-06-11_AC_biphytane_H" |>
+#   iso_read_continuous_flow(read_cache = TRUE, parallel = TRUE) |>
+#   iso_save("data/gc_irm_data_2024-06.cf.rds")
+
+iso_files_raw <- 
+  iso_read_continuous_flow("data/gc_irm_data_2024-06.cf.rds") |>
+  # remove files with read errors (usually aborted samples)
+  iso_filter_files_with_problems() |>
+  # process isodat peak table
+    # process isodat peak table
+  iso_set_peak_table_from_vendor_data_table(
+    direct_rename = c(peak_nr = "Nr.", is_ref = "Is Ref.?", 
+        rt_start = "Start", rt = "Rt", rt_end = "End", 
+        area = "rIntensity All"),
+    regex_rename = c(
+      `r\\1/\\2` = "^rR (\\d+)[^/]*\\/(\\d+).*$", # ratio values
+       `d\\1` = "^d (\\d+[^/])\\/(\\d+).*$" # delta values
+    )
+  ) |>
+  # convert units from mV to V for amplitudes and area
+  iso_convert_peak_table_units(V = mV, Vs = mVs)
+
+# occasional problems check
+issues <- iso_files_raw |> iso_get_problems() |>
+  filter(str_detect(details, "vendor data table.*empty cells"))
+if (nrow(issues) > 0) {
+  message("these could be a real problem, check into the files: ")
+  print(issues)
+  rlang::abort(messag = "looking into the above problems before proceeding!")
+}
+```
+
+## Process File Information (*)
+
+```{r}
+#| label: process-file-info-2024-06
+# parse file info
+iso_files_w_file_info <- iso_files_raw |>
+  # rename key file info columns
+  iso_rename_file_info(id1 = `Identifier 1`, id2 = `Identifier 2`) |> 
+  # process file information
+  iso_mutate_file_info(
+    # session information
+    session = "2024-06",
+    # analysis as number
+    analysis = as.integer(parse_number(Analysis)),
+    # remove white spaces
+    id1 = str_remove_all(id1, "^ +") |> str_remove_all(" +$"),
+    # what is the type of each analysis?
+    type = case_when(
+      id1 == "H3 F"                  ~ "linearity",
+      str_detect(id1, "on off")      ~ "on/off",
+      str_detect(id1, "A7")          ~ "standard",
+      str_detect(id1, "pre|post")    ~ "test",
+      str_detect(id1, "AC")          ~ "sample",
+      TRUE                           ~ "other"
+    ),
+    gc_method = str_extract(`GC Method`, "\\d+min"),
+    rep = ifelse(type %in% c("test", "sample"), id2, NA_character_),
+    # what was the autosampler position?
+    as_pos = str_replace(`AS Sample`, "Trayholder ", "Tray"),
+    # what is the injection volume? infer from AS method
+    injection_volume = str_extract(`AS Method`, "[0-9.]+u[lL] -") |>
+      parse_number() |> iso_double_with_units("uL"),
+    # concentration (only really relevant for standards)
+    concentration = ifelse(
+      type == "standard",
+      str_extract(Preparation, "[0-9.]+ ?ng( per |/)u[lL]") |> 
+      parse_number(),
+      NA_real_) |> iso_double_with_units("ng/uL"),
+    # data folder for info
+    folder = basename(dirname(file_path))
+  ) |>
+  # focus on the file info we want to use
+  iso_select_file_info(
+    session, folder, analysis, file_datetime, id1, id2, type, rep,
+    gc_method, as_pos, injection_volume, concentration)
+```
+
+## First look at chromatograms
+
+```{r}
+#| label: fig-chroms-first-look-2024-06
+#| warning: false
+#| fig-width: 10
+#| fig-height: 8
+# look at specific files for peak mapping purposes
+
+iso_files_w_file_info |> 
+  iso_filter_files(analysis %in% c(18500, 18714, 18633, 18648, 18650)) |>
+  iso_plot_continuous_flow_data(
+    data = 2,
+    time_interval = c(550, 1300),
+    peak_label = iso_format(peak_nr, rt, signif = 4),
+    panel = sprintf("%s (#%s)\n%s", type, analysis, id1),
+    peak_label_options = list(size = 3)
+  ) +
+  theme(legend.position = "none")
+```
+
+## Peak Mapping (*)
+
+```{r}
+#| label: calc-peak-mapping-2024-06
+# sample info and peak maps
+peak_maps <- readxl::read_excel("data/peak_maps_2024-06.xlsx")
+
+iso_files_w_mapped_peaks <- 
+  iso_files_w_file_info |> 
+  iso_filter_files(type %in% c("standard", "sample", "test")) |>
+  # didn't inject anything
+  iso_filter_files(!analysis %in% c(18635)) |>
+  # map peaks
+  iso_map_peaks(peak_maps, map_id = type)
+
+iso_files_2024 <- iso_files_w_mapped_peaks
+```
+
+## Preview of Peak Mapping
+
+```{r}
+#| label: fig-chroms-2024-06
+#| fig-width: 10
+#| fig-height: 8
+#| warning: false
+
+# whole chrom
+iso_files_w_mapped_peaks |>
+  iso_filter_files(analysis %in% c(18500, 18714, 18633, 18648, 18650)) |>
+  iso_plot_continuous_flow_data(
+    data=c(2,3), color=data, panel=id1,
+    peak_label=iso_format(compound, rt, d2H, signif = 3),
+    time_interval = c(550, 1300),
+    peak_label_filter = !is.na(compound) & data_wo_units == "2" & !is.na(d2H),
+    peak_label_options = list(size = 3)
+  )
+```
+
+# Continue with combined (*)
+
+```{r}
+# combine datasets
+iso_files <- c(iso_files_2023, iso_files_2024)
+iso_files |> iso_get_file_info() |> count(session, type)
+```
+
+## Reference Peak Outliers (*)
+
+```{r}
+#| label: fig-ref_peak_outliers
+#| fig-width: 24
+#| fig-height: 7
+#| warning: false
+
+# ref peak outlier cutoff
+pm_permil <- 3
+
+ref_peaks <- 
+  iso_files |>
+  iso_get_peak_table(include_file_info = everything(), quiet=TRUE) |>
+  filter(!is.na(ref_nr)) |>
+  # mass 3 detector spike on this peak!
+  filter(!(analysis == 14131 & peak_nr == 9))
+
+ref_peaks |>
+  arrange(ref_nr, analysis) |>
+  mutate(
+    x = sprintf("%s: %s", analysis, type) |> as_factor(),
+    ref_info=paste0(ref_nr, ifelse(!is.na(calib_peak) & calib_peak,"*","")) |> as_factor()
+  ) |>
+  iso_plot_ref_peaks(x = x, ratio=c('r3/2'), fill=ref_info) |>
+  iso_mark_value_range(plus_minus_value = pm_permil, plus_minus_sd = c()) |> 
+  iso_mark_outliers(plus_minus_value = pm_permil, label = analysis) +  
+  labs(x="Sequence #", fill="Reference\npeak") +
+  facet_grid(. ~ session, scales = "free_x", space = "free")
+
+# mark analyses with ref peak outliers in dataset (vs. raw measured ratios)
+outliers <- ref_peaks |> 
+  iso_identify_outliers(
+    y = 1000 * (`r3/2`/mean(`r3/2`) - 1), 
+    plus_minus_value = pm_permil, 
+    group_by = file_id
+  ) |> 
+  filter(is_outlier) |> 
+  pull(analysis) |> 
+  unique()
+
+msg <- sprintf("ref peaks deviate > %s permil in r3/2", pm_permil)
+sprintf("marking seq_nrs %s because %s", paste(outliers, collapse = ", "), msg) |> 
+  message()
+
+iso_files <- iso_files |>
+  iso_mutate_file_info(ref_peak_outliers = analysis %in% outliers)
+```
+
+## Peak Table & Calculations (*)
+
+```{r}
+#| label: calc-peak-table
+
+# pull out the file info
+file_info <- iso_files |> iso_get_file_info()
+
+# pull out the peak table and calculate the delta_peak vs. H2 ref
+peak_table <- iso_files |>
+  iso_get_peak_table(include_file_info = everything()) |>
+  group_by(file_id) |>
+  mutate(
+    ref_ratio_at_rt = 
+      lm(y ~ x, 
+         data = tibble(
+           x = rt[calib_peak == TRUE], 
+           y = `r3/2`[calib_peak == TRUE])) |> 
+      predict(newdata = tibble(x = rt)) |> 
+      as.numeric(),
+    d2H_vs_H2.permil = (`r3/2` / ref_ratio_at_rt - 1) * 1000
+  ) |>
+  ungroup() |>
+  # remove H2 (no longer needed now)
+  filter(is.na(ref_nr)) |>
+  mutate(
+    .by = "file_id",
+    mean_area = mean(area, na.rm=TRUE),
+    mean_area_identified = mean(area[!is.na(compound)], na.rm=TRUE),
+    contaminants = any(peak_type == "contaminant" & !is.na(d2H_vs_H2.permil))
+  ) |>
+  iso_make_units_explicit(prefix = ".", suffix = "")
+
+# export
+peak_table |> export_to_excel(file = "data/combined_peak_table.xlsx")
+```
+
+## Signal Yield
+
+> Get about 40mVs / ng signal yield.
+
+```{r}
+#| label: fig-yield
+#| fig-width: 7
+#| fig-height: 9
+#| message: false
+
+# estimate ng/uL injected instead of injection vol (but keep volume in there)
+peak_table |>
+  filter(type == "standard", !is.na(mean_area_identified.Vs)) |>
+  mutate(injection_amount.ng = injection_volume.uL * `concentration.ng/uL`) |>
+  ggplot() +
+  aes(
+    x = injection_amount.ng, y = mean_area_identified.Vs,
+    color = factor(as_pos)
+  ) +
+  geom_smooth(
+     method = "lm",  formula = "y ~ x",
+      mapping = aes(color = NULL, shape = NULL), color = "black"
+  ) +
+  geom_point(size = 3) +
+  geom_text(
+    data = ~
+      .x |>
+      summarize(
+        .by = "session",
+        yield = 
+          lm(mean_area_identified.Vs ~ injection_amount.ng) |> 
+          broom::tidy() |> 
+          glue::glue_data(
+            "yield: {1000*signif(estimate[2], 2)} ",
+            "\U00B1 {1000*signif(std.error[2], 1)} mVs/ng")
+      ),
+    map = aes(x = -Inf, y = +Inf, label = yield, color = NULL),
+    show.legend = FALSE, hjust = -0.05, vjust = 1.5, size = 5
+  ) +
+  facet_wrap(~session, ncol = 1, scales = "free") +
+  expand_limits(y=0,x=0) +
+  theme_figure() +
+  labs(x = "injection amount [ng]", y = "mean area [Vs]", color = "vial")
+```
+
