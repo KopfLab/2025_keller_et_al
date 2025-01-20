@@ -97,7 +97,7 @@ add_excel_sheet <- function(wb, sheet_name, ..., dbl_digits = 2, col_max_width =
         dbl_cols <- integer()
       }
       # integer column formatting
-      if (length(int_cols) > 0 && sheet_name == "summary") {
+      if (length(int_cols) > 0) {
         openxlsx::addStyle(
           wb, sheet_name, style = openxlsx::createStyle(numFmt = int_format),
           rows = (start_row + 1L):(start_row + 1L + nrow(sheet_data)),
