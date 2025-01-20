@@ -1,0 +1,924 @@
+---
+title: "Data reduction of biphytane d2H measurements"
+subtitle: "Katherine Keller/Amanda Calhoun's analytical runs"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+number-sections: true
+number-offset: 0
+number-depth: 1
+toc: true
+toc-depth: 2
+fig-width: 6
+fig-height: 4
+df-print: tibble
+embed-resources: true
+format: 
+  html: 
+    code-tools: true
+    code-fold: true
+    code-summary: "Show the code"
+    toc-float: true
+  docx: 
+    toc-title: "Table of contents"
+    fig-dpi: 600
+    execute:
+      echo: false
+knitr: 
+  opts_chunk: 
+    fig.path: "plots/data_reduction-"
+    fig.keep: "all"
+    dev: ['png', 'pdf']
+    dev.args: 
+      pdf: 
+        encoding: 'WinAnsi'
+        useDingbats: false
+crossref:
+  fig-prefix: Fig.
+  tbl-prefix: Table
+  ref-hyperlink: true
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+Using `r R.version.string`, tidyverse version `r packageVersion("tidyverse")`, isoreader version `r packageVersion("isoreader")`, and isoprocessor version `r packageVersion("isoprocessor")`.
+
+```{r}
+#| label: setup
+#| echo: true
+#| message: false
+#| warning: false
+
+# load libraries
+library(tidyverse)
+library(isoprocessor)
+
+# load scripts
+source("scripts/table_functions.R")
+source("scripts/plotting_functions.R")
+```
+
+> Note: the first code block in sections marked with (*) are essential, everything else is additional plotting and/or analysis to explore the data.
+
+# Approach
+
+Assume a background `bgrd` signal contributes to each analyte `x` such that the measured ratio for any `peak` relative to the `H2` reference gas is the mass balance between `x` and `bgrd` (note that in GC-IRMS, `bgrd` is not usually an actual blank because the baseline is already subtracted at the time of peak integration but there are other effects that conceptually are like a `bgrd` contribution such as memory effects from H sorbed in the system and potentially from the pyrolysis reactor):
+
+$$
+\begin{aligned}
+\frac{R_{peak}}{R_{H_2}} 
+  &=\frac{A_{x}}{A_{peak}}\cdot\frac{R_{analyte}}{R_{H_2}}+\frac{A_{bgrd}}{A_{peak}}\cdot\frac{R_{blank}}{R_{H_2}} \\
+  &= \left( \frac{1 - A_{bgrd}}{A_{peak}}\cdot\frac{R_{analyte}}{R_{VSMOW}} 
+  + \frac{A_{bgrd}}{A_{peak}}\cdot\frac{R_{blank}}{R_{VSMOW}} \right) \cdot{} \frac{R_{VSMOW}}{R_{H_2}} \\
+\delta_{peak/H_2}  &= \left( \frac{1 - A_{bgrd}}{A_{peak}}\cdot (\delta_x + 1)
+  + \frac{A_{bgrd}}{A_{peak}}\cdot (\delta_{bgrd} + 1) \right) \cdot\frac{R_{VSMOW}}{R_{H_2}} - 1 \\
+\end{aligned}
+$$
+
+This mass balance has the following properties:
+
+ - we know $\delta_x$ for standards and want to figure out its values for unknown analytes
+ - we have 2 quantities we measure: $\delta_{peak/H_2}$ and $A_{peak}$
+ - we have 3 unknowns that we assume to be constant in a single analytical session: 
+  - $R_{VSMOW}/R_{H_2}$: relates to the isotopic composition $\delta_{H2}$ of our reference gas and inherently includes any fractionation between analytes and ref gas that happen during the analysis
+  - $A_{bgrd}$: the amount that the bgrd contributes to each peak
+  - $\delta_{bgrd}$: the isotopic composition of the bgrd
+
+> notation notes 
+
+ - all $\delta_x$ values that do not have an explicit numerator ($\delta_{x/y}$) are vs. VSMOW
+ - all $\delta$ values are implictly multiplied by 1000 when reported as \U2030 and must be divided by 1000 when in \U2030 before being used in equations
+
+To figure out the 3 unknown constants, we can take the following approach: 
+
+## Step 1: $\delta_{peak/H_2} = \beta_0 + \beta_1 / A_{peak}$
+
+Express the above mass balance as a univariate linear regression for each individual standard compound `x` (with known $\delta_x$):
+
+$$
+\delta_{peak/H_2} = \beta_0 + \beta_1 \cdot A_{peak}^{-1} 
+$$
+
+with: 
+
+$$
+\begin{aligned}
+\beta_{0,x} &= ( \delta_{x} + 1)  \cdot \frac{R_{VSMOW}}{R_{H2}} - 1 \\
+\beta_{1,x} &= A_{bgrd} \cdot \left( \delta_{bgrd} - \delta_{x} \right) \cdot \frac{R_{VSMOW}}{R_{H2}} \\
+&= A_{bgrd} \cdot \left( \delta_{bgrd} - \delta_{x} \right) \cdot \frac{\beta_{0,x} + 1}{\delta_{x} + 1}
+\end{aligned}
+$$
+
+## Step 2: $\delta_{H_2}$
+
+Use the intercepts ($\beta_{0,x}$) to infer a $\delta_{H_2,x}$ for each standard compound `x` and incorporate the known error of $\delta_x$ and the measures error of intercept $\beta_{0,x}$. The resulting $\delta_{H_2,x}$ estimates are then used to calculate the $\delta_{H_2}$ for the entire analytical session as well as its error (either as standard deviation or standard error of the mean depending on the spread of $\beta_{0,x}$). This is similar to how this is approached in Polissar & d'Andrea except from a regression vs $A_{peak}$.
+
+$$
+\begin{aligned}
+\delta_{H_2,x} &= \frac{\delta_{x} + 1}{\beta_{0,x} + 1} - 1 \\
+\sigma_{\delta_{H_2,x}} &= \left(\delta_{H_2,x} + 1\right) \cdot \sqrt{
+  \left(\frac{\sigma_{\beta_{0,x}}}{\beta_{0,x} + 1}\right)^2 +     
+  \left(\frac{\sigma_{\delta_{x}}}{\delta_{x} + 1}\right)^2
+}
+\end{aligned}
+$$
+
+## Step 3: $y_x = \gamma_0 + \gamma_1 \cdot \delta_x$
+
+Use all $\beta_{0,x}$ and $\beta_{1,x}$ values for a second linear regression derived from rearranging the equation for $\beta_{1,x}$ to yield:
+
+$$
+\begin{aligned}
+\beta_{1,x} \cdot \frac{\delta^x + 1}{\beta_{0,x} + 1} &= A_{bgrd} \cdot \delta_{bgrd} - A_{bgrd} \cdot \delta_{x }\\
+\rightarrow y_x &= \gamma_0 + \gamma_1 \cdot \delta_x
+\end{aligned} 
+$$
+
+with
+
+$$
+\begin{aligned}
+y_x &= \beta_{1,x} \cdot \frac{\delta^x + 1}{\beta_{0,x} + 1} \\
+\gamma_0 &= A_{bgrd} \cdot \delta_{bgrd} \\
+\gamma_1 &= -A_{bgrd} 
+\end{aligned}
+$$
+
+## Step 4: $A_{bgrd}$, $\delta_{bgrd}$
+
+Use the resulting regression parameters $\gamma_0$ (intercept) and $\gamma_1$ (slope) to calculate $A_{bgrd}$ and $\delta_{bgrd}$:
+
+$$
+\begin{aligned}
+\rightarrow A_{bgrd} &= -\gamma_1 \\
+\rightarrow \delta_{bgrd} &= -\frac{\gamma_0}{\gamma_1} \\
+\sigma_{A_{bgrd}} &= \sigma_{\gamma_1} \\
+\sigma_{\delta_{bgrd}} &= 
+  |\delta_{bgrd}| \cdot \sqrt{
+  \left(\frac{\sigma_{\gamma_0}}{\gamma_0}\right)^2 +     
+  \left(\frac{\sigma_{\gamma_1}}{\gamma_1}\right)^2
+}
+\end{aligned}
+$$
+
+## Step 5: apply calibration
+
+Solve the mass balance for $\delta_x$ ($\delta_{analyte/VSMOW}$) and calculate the calibration error $\sigma_{\delta_x}$ by standard error propagation:
+
+$$
+\begin{aligned}
+\delta_x &= \frac{A_{peak}}{A_{peak} - A_{bgrd}} \cdot
+  \left( \delta_{H_2} + \delta_{peak/H_2} + \delta_{H_2} \cdot \delta_{peak/H_2} \right) -
+  \frac{A_{bgrd}}{A_{peak} - A_{bgrd}} \cdot \delta_{bgrd} \\
+\frac{\partial \delta_x}{\partial \delta_{H_2}} &= 
+  \frac{A_{peak}}{A_{peak} - A_{bgrd}} \cdot
+  \left( 1 + \delta_{peak/H_2} \right) \\
+\frac{\partial \delta_x}{\partial \delta_{bgrd}} &= 
+  - \frac{A_{bgrd}}{A_{peak} - A_{bgrd}} \\
+\frac{\partial \delta_x}{\partial A_{bgrd}} &= 
+  \frac{A_{peak} \cdot 
+    \left( \delta_{H_2} + \delta_{peak/H_2} + \delta_{H_2} \cdot \delta_{peak/H_2} - \delta_{bgrd} \right)}
+    {(A_{peak} - A_{bgrd})^2} \\
+\sigma_{\delta_x} &= \sqrt{
+  \left(\frac{\partial \delta_x}{\partial \delta_{H_2}} \cdot \sigma_{\delta_{H_2}}\right)^2 +
+  \left(\frac{\partial \delta_x}{\partial \delta_{bgrd}} \cdot \sigma_{\delta_{bgrd}}\right)^2 +
+  \left(\frac{\partial \delta_x}{\partial A_{bgrd}} \cdot \sigma_{A_{bgrd}}\right)^2
+}
+\end{aligned}
+$$
+
+## Step 6: calculate averages and errors
+
+This step entails calculating the analytical averages for sample compounds and their error estimates by evaluating propagated error from the calibration, pooled statistical error from the samples themselves, as well as unbiased standard deviation of the nC36 standard. Before this step it may be advisable to iterate back to Step 1 and re-run the calibration with an area limit if necessary as well as set the area range for where the calibration residuals are approximately zero.
+
+# Load peak tables (*)
+
+This table is generated from multiple analytical sessions in `gc_irms_data_peak_mapping.qmd`.
+
+```{r}
+# load parquet file
+peak_table <- arrow::read_parquet("data/combined_peak_table.parquet")
+```
+
+# Prepare calibration (*)
+
+```{r}
+# set area limit for calibration parameter calculation
+area_limits <- 
+  tibble::tribble(
+    ~session, ~area_limit.Vs,
+    "2023-06", Inf,
+    "2024-06", 40
+  )
+area_limits
+
+# define calibration standards
+calculate_unbiased_sd <- function(sd, n) {
+  cn <- suppressWarnings(sqrt(2/(n - 1)) * gamma(n/2) / gamma((n - 1) / 2))
+  return(sd/cn)
+}
+standards <- 
+  readxl::read_excel("data/standards.xlsx", "A7-2025") |>
+  # I don't trust these standards, nC16 is the first peak and systematically off and nC24 is usually an outlier
+  #filter(!compound %in% c("nC16", "nC24")) |>
+  filter(!compound %in% c("nC16")) |>
+  mutate(
+    known_d2H_sem.permil = 
+      calculate_unbiased_sd(known_d2H_sd.permil, n_d2H)/sqrt(n_d2H),
+    .after = "known_d2H_sd.permil"
+  ) 
+standards
+
+# merge info into peak table
+peak_table_for_calib <- 
+  peak_table |>
+  filter(!is.na(d2H_vs_H2.permil)) |>
+  left_join(area_limits, by = "session") |>
+  relocate("area_limit.Vs", .after = "area.Vs") |>
+  left_join(
+    standards |> 
+      select("compound", "n_d2H", "known_d2H.permil", "known_d2H_sd.permil") |>
+      mutate(type = "standard"), 
+    by = c("type", "compound")
+  ) |>
+  # flag standards for calibration
+  # (include those within the area limit with known isotopic composition)
+  mutate(
+    is_standard = type == "standard" & !is.na(known_d2H.permil),
+    use_to_calibrate = is_standard & area.Vs <= area_limit.Vs
+  )
+stopifnot("area limits have missing sessions" =
+            all(!is.na(peak_table_for_calib$area_limit.Vs)))
+```
+
+# Calibrate
+
+## Step 1: $\delta_{peak/H_2} = \beta_0 + \beta_1 / A_{peak}$
+
+### Calculation (*)
+
+```{r}
+#| label: calc-s1-reg-each-compound
+each_cmp_reg <- 
+  peak_table_for_calib |> 
+  filter(use_to_calibrate) |>
+  nest(data = -c("session", "compound")) |>
+  mutate(
+    n_stds = map_int(data, nrow),
+    fit = map(data, lm, formula = d2H_vs_H2.permil ~ I(1/area.Vs)),
+    coefs = map(fit, broom::tidy)
+  ) |>
+  select(-"data", -"fit") |>
+  unnest("coefs") |>
+  select(-"statistic", -"p.value") |>
+  mutate(term = case_when(term == "(Intercept)" ~ "b0", term == "I(1/area.Vs)" ~ "b1")) |>
+  rename(v = estimate, sem = std.error) |>
+  pivot_wider(names_from = term, values_from = c(v, sem), 
+              names_glue = "{term}_{.value}")
+
+each_cmp_reg
+```
+
+### Visualization
+
+```{r}
+#| label: fig-s1-reg-each-compound
+#| fig-width: 13
+#| fig-height: 11
+peak_table_for_calib |> 
+  filter(is_standard) |>
+  mutate(
+    panel = sprintf("%s (%s\U2030)", compound, known_d2H.permil)
+  ) |>
+  ggplot() +
+  aes(x = area.Vs, y = d2H_vs_H2.permil, color = session, shape = session) +
+  geom_point(
+    data = ~filter(.x, use_to_calibrate), alpha = 1) +
+  geom_point(
+    data = ~filter(.x, !use_to_calibrate), alpha = 0.3) +
+  geom_smooth(
+    data = ~filter(.x, use_to_calibrate),
+    method = "lm", formula = y ~ I(1/x), show.legend = FALSE
+  ) +
+  facet_wrap(~panel, scales = "free") +
+  scale_color_brewer(palette = "Dark2") +
+  theme_figure() +
+  guides(color = guide_legend(override.aes = list(alpha = 1, size = 3))) +
+  labs(x = "area [Vs]", y = expression("\U03B4"[peak/H[2]]~"[\U2030]"))
+```
+
+## Step 2: $\delta_{H_2}$
+
+### Calculation (*)
+
+```{r}
+#| label: calc-s2-ref-H2
+# calculate d2H of H2 ref gas
+each_cmp_params <- 
+  each_cmp_reg |>
+  left_join(standards |> select("compound", matches("d2H")), by = "compound") |>
+  mutate(
+    d2H_H2.permil = 1000 * ((known_d2H.permil/1000 + 1) / (b0_v/1000 + 1) - 1),
+    d2H_H2_sem.permil = abs(d2H_H2.permil + 1000) * sqrt(
+      (b0_sem/(b0_v + 1000))^2 + (known_d2H_sem.permil/(known_d2H.permil + 1000))^2
+    ),
+    y.Vs = b1_v * (known_d2H.permil + 1000)/(b0_v + 1000),
+    y_sem.Vs = abs(y.Vs) * sqrt(
+      (b1_sem/b1_v)^2 + (b0_sem/(b0_v + 1000))^2 + (known_d2H_sem.permil/(known_d2H.permil + 1000))^2
+    )
+  )
+
+# what then is the ref gas uncertainty? (Polissar & d'Andrea)
+refH2 <- 
+  each_cmp_params |>
+  summarise(
+    .by = "session",
+    # sem based on the means of the sds
+    d_H2_sem.permil = mean(d2H_H2_sem.permil)/sqrt(n()),
+    # sd based on the measured means
+    d_H2_sd.permil = sd(d2H_H2.permil),
+    # which one to use? see discussion in Polissar & d'Andrea
+    case = if_else(
+      d_H2_sd.permil <= d_H2_sem.permil * sqrt(n()), "case 1 (sem)", "case 2 (sd)"
+    ),
+    # mean
+    d_H2_v.permil = mean(d2H_H2.permil),
+    # effective error to use
+    d_H2_err.permil = case_when(
+      case == "case 1 (sem)" ~ d_H2_sem.permil,
+      case == "case 2 (sd)" ~ d_H2_sd.permil
+    )
+  )
+refH2
+```
+
+### Visualization
+
+```{r}
+#| label: fig-s2-ref-H2
+#| fig-width: 12
+#| fig-height: 5
+
+# visualize
+set.seed(123)
+each_cmp_params |>
+  ggplot() +
+  aes(x = compound, y = d2H_H2.permil, 
+      color = session, shape = session,
+      ymin = d2H_H2.permil - d2H_H2_sem.permil, 
+      ymax = d2H_H2.permil + d2H_H2_sem.permil) + 
+  # mean
+  geom_hline(
+    data = refH2, 
+    map = aes(yintercept = d_H2_v.permil, color = session, linetype = "mean")
+  ) +
+  # error ranges
+  geom_hline(
+    data = refH2 |> pivot_longer(matches("sem|sd")) |>
+      crossing(pm = c(-1, 1)) |>
+      mutate(
+        name = str_extract(name, "sem|sd"),
+        value = d_H2_v.permil + pm * value
+      ),
+    map = aes(yintercept = value, linetype = name, color = session)
+  ) +
+  # data
+  geom_pointrange(size = 1, position = "jitter") +
+  scale_color_brewer(palette = "Dark2") +
+  theme_figure(grid = FALSE) +
+  labs(x = NULL, y = expression("\U03B4 H"[2]~"[\U2030]"), 
+       fill = "used", linetype = "option")
+```
+
+## Step 3: $y_x = \gamma_0 + \gamma_1 \cdot \delta_x$
+
+### Calculation (*)
+
+```{r}
+#| label: calc-s3-reg-y-vs-delta
+y_vs_delta_reg <- 
+  each_cmp_params |>
+  nest(data = -c("session")) |>
+  mutate(
+    n_compounds = map_int(data, nrow),
+    # should this be a york regression instead?
+    # seems unnecessary given the tiny errors in x
+    fit = map(data, lm, formula = y.Vs ~ known_d2H.permil),
+    coefs = map(fit, broom::tidy)
+  ) |>
+  select(-"data", -"fit") |> unnest("coefs") |>
+  select(-"statistic", -"p.value") |>
+  mutate(term = case_when(term == "(Intercept)" ~ "g0", term == "known_d2H.permil" ~ "g1")) |>
+  rename(v = estimate, sem = std.error) |>
+  pivot_wider(names_from = term, values_from = c(v, sem), 
+              names_glue = "{term}_{.value}")
+
+y_vs_delta_reg
+```
+
+### Visualization
+
+```{r}
+#| label: fig-s3-reg-y-vs-delta
+#| fig-width: 8
+#| fig-height: 5
+
+# visualize
+each_cmp_params |>
+  ggplot() + 
+  aes(x = known_d2H.permil, color = session, shape = session,
+      xmin = known_d2H.permil - known_d2H_sem.permil,
+      xmax = known_d2H.permil + known_d2H_sem.permil,
+      y = y.Vs, ymin = y.Vs - y_sem.Vs, ymax = y.Vs + y_sem.Vs,
+      label = compound
+  ) +
+  # intercept
+  geom_hline(
+    data = y_vs_delta_reg,
+    map = aes(
+      yintercept = g0_v, color = session, 
+      linetype = "gamma[0] == A[bgrd] %.% delta[bgrd]")) +
+  # slope
+  geom_smooth(
+    map = aes(xmin = NULL, xmax = NULL, label = NULL, 
+              linetype = "gamma[1] == -A[bgrd]"), 
+    method = "lm", formula = y ~ x, fullrange = TRUE
+  ) +
+  geom_errorbarh(height = 0, show.legend = FALSE) +
+  geom_errorbar(width = 0, show.legend = FALSE) +
+  geom_point(size = 4) +
+  theme_figure(grid = FALSE) +
+  scale_linetype_manual(values = c(2, 1), labels = scales::label_parse()) +
+  scale_color_brewer(palette = "Dark2") +
+  scale_fill_brewer(palette = "Dark2") +
+  guides(
+    color = guide_legend(override.aes = list(fill = NA)),
+    linetype = guide_legend(override.aes = list(fill = NA, color = "black"))
+  ) +
+  expand_limits(
+    x = extend_limits(c(standards$known_d2H.permil, y_vs_delta_reg$g0_v), mult = 0.05)) +
+  coord_cartesian(expand = FALSE) +
+  labs(
+    x = expression("\U03B4"[known]~"[\U2030]"),
+    y = expression(beta[1] %.% over("\U03B4"[known] + 1, beta[0] + 1)~"[Vs]"),
+    linetype = "parameters"
+  )
+```
+
+```{r}
+#| label: fig-s3-reg-y-vs-delta-interactive
+#| fig-width: 8
+#| fig-height: 5
+#| eval: false
+#| echo: false
+
+# visualize
+(ggplot2::last_plot() + labs(x = "known d2H", y = "y")) |> 
+  plotly::ggplotly(dynamicTicks = TRUE)
+```
+
+## Step 4: $A_{bgrd}$, $\delta_{bgrd}$
+
+### Calculation (*)
+
+```{r}
+#| label: calc-s4-bgrd
+# calculate the background parameters
+bgrd <-
+  y_vs_delta_reg |>
+  transmute(
+    session = session,
+    A_bgrd_v.Vs = -g1_v, 
+    A_bgrd_sem.Vs = g1_sem,
+    A_bgrd_sd.Vs = g1_sem * sqrt(n()),
+    d_bgrd_v.permil = -g0_v/g1_v,
+    d_bgrd_sem.permil = abs(d_bgrd_v.permil) * sqrt( (g0_sem/g0_v)^2 + (g1_sem/g1_v)^2 ),
+    d_bgrd_sd.permil = d_bgrd_sem.permil * sqrt(n())
+  )
+bgrd
+
+# actual parameters - which errors to use?
+all_parameters <- 
+  refH2 |> 
+  select("session", "d_H2_v.permil", "d_H2_err.permil") |>
+  left_join(bgrd, by = "session") |>
+  # similar argument to with d_H2, we want to recognize there is probably
+  # enough variability that the SEM may not be representative enough
+  mutate(A_bgrd_err.Vs = A_bgrd_sd.Vs, .after = "A_bgrd_v.Vs") |>
+  mutate(d_bgrd_err.permil = d_bgrd_sd.permil, .after = "d_bgrd_v.permil") |>
+  select("session", matches("_(v|err)"))
+all_parameters
+```
+
+### Visualization
+
+```{r}
+#| label: fig-s4-bgrd
+#| fig-width: 12
+#| fig-height: 3
+
+# visualize all parameters
+all_parameters |>
+  pivot_longer(
+    -"session", names_to = c("parameter", ".value", "units"),
+    names_pattern = "([^_]+_[^_]+)_([^.]+)\\.(.*)") |>
+  mutate(
+    panel = sprintf("%s [%s]", parameter, units) |> as_factor(),
+  ) |>
+  ggplot() +
+  aes(v, xmin = v-err, xmax = v+err,
+      y = session, color = session) +
+  geom_pointrange(size = 1) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_grid(.~panel, scales = "free_x") +
+  theme_figure(grid = FALSE) +
+  theme(panel.spacing.x = unit(0.05, "npc")) +
+  labs(x = NULL, y = NULL)
+```
+
+## Step 5: apply calibration
+
+### Calculation (*)
+
+```{r}
+#| label: calc-s5-calibrated-data
+
+# use this area range for where to apply the calibration, will use
+# the cloesest larger/smaller to these values from the calibration
+calib_area_range <- 
+  tibble::tribble(
+    ~session, ~area_calib_min.Vs, ~area_calib_max.Vs,
+    "2023-06", 3,           40,
+    "2024-06", 3,           40
+  )
+
+# calculate calibrated d2H
+calculate_calibrated_d2H.permil <- function(session, d_vs_ref_gas.permil, area.Vs, params = all_parameters) {
+  params |> 
+    filter(session == !!session) |>
+    with({
+      area.Vs/(area.Vs - A_bgrd_v.Vs) * 
+        (d_vs_ref_gas.permil + d_H2_v.permil + d_vs_ref_gas.permil * d_H2_v.permil/1000) -
+        A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_v.permil
+    })
+}
+
+# calculate calibrated d2H se
+calculate_calibrated_d2H_se.permil <- function(session, d_vs_ref_gas.permil, area.Vs, params = all_parameters) {
+  params |> 
+    filter(session == !!session) |>
+    with({
+      sqrt(
+        (area.Vs/(area.Vs - A_bgrd_v.Vs) * (1 + d_vs_ref_gas.permil/1000) * d_H2_err.permil)^2 +
+          (A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_err.permil)^2 +
+          (area.Vs/(area.Vs - A_bgrd_v.Vs)^2 * area.Vs *
+             (d_vs_ref_gas.permil + d_H2_v.permil + d_vs_ref_gas.permil * d_H2_v.permil/1000 + d_bgrd_v.permil) *
+             A_bgrd_err.Vs)^2
+      )
+    })
+}
+
+# run the processing pipeline
+# Q/FIXME: merge in all parameters always so its part of the data frame? probably YES
+peak_table_calibrated <- 
+  peak_table_for_calib |>
+  filter(!is.na(compound), !is.na(d2H_vs_H2.permil)) |> 
+  left_join(calib_area_range, by = "session") |>
+  # this step is ONLY needed for correction without area consideration!
+  mutate(
+    .by = c("session", "compound"),
+    d_H2_direct.permil = 
+      mean(
+      (known_d2H.permil[use_to_calibrate] + 1000) / 
+      (d2H_vs_H2.permil[use_to_calibrate]/1000 + 1) - 1000
+      )
+  ) |>
+  # regular calculations
+  mutate(
+    .by = "session",
+    area_calib_min.Vs = min(area.Vs[use_to_calibrate & area.Vs >= area_calib_min.Vs]),
+    area_calib_max.Vs = max(area.Vs[use_to_calibrate & area.Vs <= area_calib_max.Vs]),
+    in_area_range = area.Vs >= area_calib_min.Vs & area.Vs <= area_calib_max.Vs,
+    calibrated_d2H.permil = 
+      calculate_calibrated_d2H.permil(session[1], d2H_vs_H2.permil, area.Vs),
+    calibrated_d2H_err.permil =
+      calculate_calibrated_d2H_se.permil(session[1], d2H_vs_H2.permil, area.Vs),
+    residual.permil = if_else(
+      !is.na(known_d2H.permil),
+      calibrated_d2H.permil - known_d2H.permil,
+      NA_real_
+    ),
+    # without area consideration (i.e. standard correction) - just for comparison
+    d_H2_direct.permil = mean(unique(d_H2_direct.permil[use_to_calibrate])),
+    calibrated_d2H_no_area_corr.permil = d2H_vs_H2.permil + d_H2_direct.permil + 
+      d2H_vs_H2.permil * d_H2_direct.permil/1000
+  )
+
+stopifnot("area range has missing sessions" =
+            all(!is.na(peak_table_calibrated$area_calib_min.Vs)))
+
+# whole calibration RMSE (within the calib area) 
+# root mean square error / root mean square deviation
+calib_stats <- 
+  peak_table_calibrated |>
+  bind_rows(peak_table_calibrated |> mutate(session = "all")) |>
+  filter(use_to_calibrate) |>
+  summarize(
+    .by = "session",
+    n_analyses = unique(file_id) |> length(),
+    n_std_peaks = n(), 
+    RMSE.permil = sqrt(mean(residual.permil^2))
+  )
+calib_stats
+```
+
+### Visualization
+
+```{r}
+#| label: fig-calibration-residuals-and-range
+#| fig-width: 12
+#| fig-height: 8
+#| 
+# evaluate residuals
+peak_table_calibrated |>
+  # what to show?
+  filter(type == "standard" | str_detect(compound, "BP")) |>
+  # how to render the y-facets 
+  mutate(
+    panel_y = type |> paste("distribution [#]") |> factor() |> 
+      fct_recode("standard residuals [\U2030]" = "standard distribution [#]") |>
+      fct_relevel("standard residuals [\U2030]", after = Inf)
+  ) |>
+  ggplot() +
+  aes(x = area.Vs) +
+  # area calibration range
+  geom_rect(
+    data = ~.x |> select("session", "area_calib_min.Vs", "area_calib_max.Vs") |>
+      distinct(),
+    map = aes(xmin = area_calib_min.Vs, xmax = area_calib_max.Vs,
+              x = NULL, ymin = -Inf, ymax = Inf), color = NA, fill = "gray90"
+  ) +
+  # sample distribution with area
+  geom_rug(
+    data = ~.x |> filter(type != "standard"),
+    map = aes(color = compound),
+    sides = "t", length = grid::unit(0.05, "npc")
+  ) +
+  geom_density(
+    data = ~.x |> filter(type != "standard"),
+    map = aes(y = after_stat(count), color = compound),
+    alpha = 0.1
+  ) +
+  # standards' residuals
+  geom_hline(
+    data = ~.x |> select("panel_y") |> distinct() |> 
+      filter(str_detect(panel_y, "standard")),
+    map = aes(yintercept = 0), show.legend = FALSE, linetype = 2
+  ) +
+  geom_errorbar(
+    data = ~.x |> filter(is_standard), 
+    map = aes(y = residual.permil, ymin = residual.permil-calibrated_d2H_err.permil,
+              ymax = residual.permil+calibrated_d2H_err.permil), 
+    width = 0, alpha = 0.2
+  ) +
+  geom_point(
+    data = ~.x |> filter(is_standard, in_area_range), 
+    map = aes(y = residual.permil),
+    alpha = 1
+  ) + 
+  geom_point(
+    data = ~.x |> filter(is_standard, !in_area_range), 
+    map = aes(y = residual.permil), alpha = 0.3
+  ) + 
+  # spread of residuals
+  geom_smooth(
+    data = ~.x |> filter(is_standard, in_area_range),
+    mapping = aes(color = NULL, y = residual.permil), 
+    method = "loess", formula = y ~ x,
+    color = "green2", linetype = 1
+  ) +
+  facet_grid(panel_y ~ session, scales = "free", switch = "y") +
+  scale_x_log10(breaks = scales::breaks_log(8)) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_figure(grid = FALSE) +
+  theme(
+    legend.position = "top", legend.direction = "horizontal",
+    strip.background.y = element_blank(), strip.placement = "outside"
+  ) +
+  labs(x = "area [Vs]", y = NULL, color = NULL)
+```
+
+### Without area correction
+
+```{r}
+#| label: fig-calibration-residuals-and-range-no-area-corr
+#| fig-width: 12
+#| fig-height: 8
+ggplot2::last_plot() +
+  geom_point(
+    data = ~.x |> filter(is_standard, in_area_range), 
+    map = aes(y = calibrated_d2H_no_area_corr.permil - known_d2H.permil), 
+    alpha = 0.3, color = "blue"
+  ) + 
+  geom_smooth(
+    data = ~.x |> filter(is_standard, in_area_range),
+    mapping = aes(color = NULL, y = calibrated_d2H_no_area_corr.permil - known_d2H.permil), 
+    method = "loess", formula = y ~ x,
+    color = "red", linetype = 2
+  ) 
+```
+
+## Step 6: calculate averages and errors
+
+### Calculation (*)
+
+```{r}
+#| label: calc-s6-stats
+# unbiased sds for standards (within the calib area)
+calib_compounds_stats <- 
+  peak_table_calibrated |>
+  bind_rows(peak_table_calibrated |> mutate(session = "all")) |>
+  filter(use_to_calibrate) |>
+  summarize(
+    .by = c("session", "compound", "known_d2H.permil"),
+    n_analyses = n(),
+    calib_mean.permil = mean(calibrated_d2H.permil),
+    sdev_unbiased.permil = calculate_unbiased_sd(sd(calibrated_d2H.permil), n()),
+    RMSE = sqrt(mean(residual.permil^2))
+  )
+calib_compounds_stats |> filter(compound == "nC36")
+
+# which sdevs to use? compare propagated error, pooled sample error, and nC36 (standard) error
+sample_stats <- 
+  peak_table_calibrated |>
+  bind_rows(peak_table_calibrated |> mutate(session = "all")) |>
+  filter(type != "standard", str_detect(compound, "BP"), in_area_range) |>
+  summarize(
+    .by = c("session", "id1", "compound"),
+    n_rep_analyses = n(),
+    sdev = sd(calibrated_d2H.permil), # statistical sdev
+    sem = sqrt(sum( (calibrated_d2H_err.permil/n_rep_analyses)^2)) # propagated error
+  ) |>
+  # calculate unbiased sdev
+  mutate(
+    sdev_unbiased = 
+      case_when(
+        n_rep_analyses > 1 ~ calculate_unbiased_sd(sdev, n_rep_analyses),
+        TRUE ~ NA_real_
+      )
+  ) |>
+  # summarize across samples
+  summarize(
+    .by = c("session", "compound"),
+    # all that have more than 1 analysis contribute to the sdev_pooled estimate
+    n_samples = sum(n_rep_analyses > 1),
+    sdev_propagated = mean(sem),
+    sdev_pooled = sqrt( sum((n_rep_analyses - 1) * sdev_unbiased^2, na.rm = TRUE) / 
+                          sum(n_rep_analyses - 1))
+  ) |>
+  left_join(
+    calib_compounds_stats |> filter(compound == "nC36") |> 
+      select("session", "n_nC36" = "n_analyses", 
+             "sdev_nC36" = "sdev_unbiased.permil"),
+    by = "session"
+  ) |>
+  mutate(
+    .by = c("session", "compound"),
+    use_sdev = max(c(sdev_propagated, sdev_pooled, sdev_nC36))
+  ) |>
+  arrange(desc(session), compound)
+sample_stats
+
+# calculate averages and error ranges
+peak_table_summary <- 
+  peak_table_calibrated |>
+  filter(type != "standard", str_detect(compound, "BP")) |>
+  summarize(
+    .by = c("id1", "compound"),
+    n_analyses_in_area_range = sum(in_area_range) |> as.integer(),
+    n_analyses_not_in_range = sum(!in_area_range) |> as.integer(),
+    calibrated_d2H.permil = 
+      if_else(n_analyses_in_area_range > 0,
+        mean(calibrated_d2H.permil[in_area_range]),
+        NA_real_
+      )
+  ) |> 
+  left_join(sample_stats |> filter(session == "all") |>
+              select("compound", matches("sdev")), by = "compound") |>
+  mutate(
+    calibrated_d2H_sem.permil = 
+      if_else(n_analyses_in_area_range > 0,
+        use_sdev/sqrt(n_analyses_in_area_range),
+        NA_real_
+      )
+  ) |>
+  arrange(id1, compound)
+
+# export
+export_to_excel(
+  `analyses` = peak_table_calibrated,
+  `summary` = peak_table_summary,
+  file = "output/gc_irms_data_calibrated.xlsx"
+)
+
+# show a bit
+peak_table_summary |> head()
+```
+
+
+
+
+# OTHER
+
+### Accuracy standard: nC36 (skip?)
+
+```{r}
+#| label: fig-calibration-accuracy
+#| fig-width: 6
+#| fig-height: 6
+
+# nC36 summary
+peak_table_calibrated |>
+  bind_rows(peak_table_calibrated |> mutate(session = "all")) |>
+  filter(compound == "nC36", in_area_range) |>
+  summarize(
+    .by = c("session", "known_d2H.permil"),
+    n = n(),
+    calib_mean.permil = mean(calibrated_d2H.permil),
+    unbiased_sd.permil = calculate_unbiased_sd(sd(calibrated_d2H.permil), n),
+    diff.permil = mean(residual.permil),
+    RMSE = sqrt(mean(residual.permil^2))
+  ) |>
+  knitr::kable(digits = 2)
+
+# visualize
+peak_table_calibrated |>
+  filter(compound == "nC36") |>
+  ggplot() +
+  aes(area.Vs, residual.permil, 
+      ymin = residual.permil - calibrated_d2H_err.permil,
+      ymax = residual.permil + calibrated_d2H_err.permil,
+      color = session, shape = session
+    ) +
+  geom_hline(yintercept = 0, linetype = 2) +
+  geom_hline(
+    data = ~.x |> filter(in_area_range) |> 
+      summarize(.by = "session", y = mean(residual.permil)),
+    map = aes(yintercept = y, x = NULL, color = session), 
+    linetype = 1, linewidth = 0.5
+  ) +
+  # data
+  geom_errorbar(data = ~.x |> filter(!in_area_range), width = 0, alpha = 0.5) +
+  geom_point(data = ~.x |> filter(!in_area_range), size = 4, alpha = 0.5) +
+  geom_errorbar(data = ~.x |> filter(in_area_range), width = 0) +
+  geom_point(data = ~.x |> filter(in_area_range), size = 4) +
+  # styling
+  labs(
+    x = "area 2 [Vs]",
+    y = expression("error ("*delta[calib] - delta[known]*") for accuracy standard(nC"[36]*")")
+  ) +
+  scale_x_log10(breaks = scales::breaks_log(8)) + 
+  scale_y_continuous(
+    labels = function(x) paste0(x, "\U2030"),
+    breaks = seq(-30, 30, by = 2.5)
+  ) +
+  scale_color_brewer(palette = "Dark2") +
+  theme_figure(grid = FALSE) +
+  theme(legend.position = "bottom", legend.direction = "vertical") +
+  coord_cartesian(
+    xlim = peak_table_calibrated |>
+      filter(compound == "nC36") |>
+      filter(in_area_range) |> 
+      pull(area.Vs) |> extend_limits(mult = c(0.03, 0.3)),
+    ylim = peak_table_calibrated |>
+      filter(compound == "nC36") |>
+      filter(in_area_range) |> 
+      pull(residual.permil) |> extend_limits(mult = 0.2)
+  )
+```
+
+### Error range (skip?)
+
+```{r}
+peak_table_calibrated |>
+  filter(in_area_range) |>
+  summarize(
+    .by = "session",
+    # FIXME: find a better way to expand the range
+    area.Vs = list(seq(min(area.Vs)^0.9, max(area.Vs)^1.1, length.out = 100)),
+    d2H.permil = list(seq(min(calibrated_d2H.permil), max(calibrated_d2H.permil), length.out = 100)),
+  ) |>
+  unnest("area.Vs") |> unnest("d2H.permil") |>
+  mutate(
+    .by = "session",
+    calibrated_d2H_sem.permil =
+      calculate_calibrated_d2H_se.permil(session[1], d2H.permil, area.Vs)
+  ) |>
+  ggplot() +
+  aes(area.Vs, d2H.permil, z = calibrated_d2H_sem.permil) +
+  geom_contour_filled() +
+  scale_x_log10(breaks = scales::breaks_log(8)) +
+  coord_cartesian(expand = FALSE) + 
+  facet_wrap(~session, scales = "free")
+```
+
+
