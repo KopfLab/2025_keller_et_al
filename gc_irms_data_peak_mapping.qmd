@@ -436,8 +436,6 @@ peak_table |> export_to_excel(file = "data/combined_peak_table.xlsx")
 
 ## Signal Yield
 
-> Get about 40mVs / ng signal yield.
-
 ```{r}
 #| label: fig-yield
 #| fig-width: 7

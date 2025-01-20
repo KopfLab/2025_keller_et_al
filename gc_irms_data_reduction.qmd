@@ -209,7 +209,7 @@ area_limits <-
     "2023-06", Inf,
     "2024-06", 40
   )
-area_limits
+area_limits |> knitr::kable()
 
 # define calibration standards
 calculate_unbiased_sd <- function(sd, n) {
@@ -218,15 +218,14 @@ calculate_unbiased_sd <- function(sd, n) {
 }
 standards <- 
   readxl::read_excel("data/standards.xlsx", "A7-2025") |>
-  # I don't trust these standards, nC16 is the first peak and systematically off and nC24 is usually an outlier
-  #filter(!compound %in% c("nC16", "nC24")) |>
+  # nC16 is the first peak and usually systematically off
   filter(!compound %in% c("nC16")) |>
   mutate(
     known_d2H_sem.permil = 
       calculate_unbiased_sd(known_d2H_sd.permil, n_d2H)/sqrt(n_d2H),
     .after = "known_d2H_sd.permil"
-  ) 
-standards
+  ) |> select("compound", "n_d2H", "known_d2H.permil", "known_d2H_sem.permil") 
+standards |> knitr::kable(d = 3)
 
 # merge info into peak table
 peak_table_for_calib <- 
@@ -235,9 +234,7 @@ peak_table_for_calib <-
   left_join(area_limits, by = "session") |>
   relocate("area_limit.Vs", .after = "area.Vs") |>
   left_join(
-    standards |> 
-      select("compound", "n_d2H", "known_d2H.permil", "known_d2H_sd.permil") |>
-      mutate(type = "standard"), 
+    standards |> mutate(type = "standard"), 
     by = c("type", "compound")
   ) |>
   # flag standards for calibration
@@ -275,7 +272,7 @@ each_cmp_reg <-
   pivot_wider(names_from = term, values_from = c(v, sem), 
               names_glue = "{term}_{.value}")
 
-each_cmp_reg
+each_cmp_reg |> knitr::kable(d = 2)
 ```
 
 ### Visualization
@@ -348,7 +345,7 @@ refH2 <-
       case == "case 2 (sd)" ~ d_H2_sd.permil
     )
   )
-refH2
+refH2 |> knitr::kable(d = 1)
 ```
 
 ### Visualization
@@ -412,7 +409,7 @@ y_vs_delta_reg <-
   pivot_wider(names_from = term, values_from = c(v, sem), 
               names_glue = "{term}_{.value}")
 
-y_vs_delta_reg
+y_vs_delta_reg |> knitr::kable(d = 3)
 ```
 
 ### Visualization
@@ -494,7 +491,6 @@ bgrd <-
     d_bgrd_sem.permil = abs(d_bgrd_v.permil) * sqrt( (g0_sem/g0_v)^2 + (g1_sem/g1_v)^2 ),
     d_bgrd_sd.permil = d_bgrd_sem.permil * sqrt(n())
   )
-bgrd
 
 # actual parameters - which errors to use?
 all_parameters <- 
@@ -506,7 +502,7 @@ all_parameters <-
   mutate(A_bgrd_err.Vs = A_bgrd_sd.Vs, .after = "A_bgrd_v.Vs") |>
   mutate(d_bgrd_err.permil = d_bgrd_sd.permil, .after = "d_bgrd_v.permil") |>
   select("session", matches("_(v|err)"))
-all_parameters
+all_parameters |> knitr::kable(d = 3)
 ```
 
 ### Visualization
@@ -550,6 +546,7 @@ calib_area_range <-
     "2023-06", 3,           40,
     "2024-06", 3,           40
   )
+calib_area_range |> knitr::kable()
 
 # calculate calibrated d2H
 calculate_calibrated_d2H.permil <- function(session, d_vs_ref_gas.permil, area.Vs, params = all_parameters) {
@@ -628,7 +625,7 @@ calib_stats <-
     n_std_peaks = n(), 
     RMSE.permil = sqrt(mean(residual.permil^2))
   )
-calib_stats
+calib_stats |> knitr::kable(d = 1)
 ```
 
 ### Visualization
@@ -733,19 +730,19 @@ ggplot2::last_plot() +
 
 ```{r}
 #| label: calc-s6-stats
-# unbiased sds for standards (within the calib area)
+# unbiased sdevs for methodological standards (within the calib area)
 calib_compounds_stats <- 
   peak_table_calibrated |>
   bind_rows(peak_table_calibrated |> mutate(session = "all")) |>
-  filter(use_to_calibrate) |>
+  filter(in_area_range, str_detect(peak_type, "(?<!iso-)std|standard")) |>
   summarize(
-    .by = c("session", "compound", "known_d2H.permil"),
+    .by = c("session", "compound", "peak_type", "known_d2H.permil"),
     n_analyses = n(),
     calib_mean.permil = mean(calibrated_d2H.permil),
     sdev_unbiased.permil = calculate_unbiased_sd(sd(calibrated_d2H.permil), n()),
     RMSE = sqrt(mean(residual.permil^2))
   )
-calib_compounds_stats |> filter(compound == "nC36")
+calib_compounds_stats |> knitr::kable(d = 1)
 
 # which sdevs to use? compare propagated error, pooled sample error, and nC36 (standard) error
 sample_stats <- 
@@ -781,14 +778,16 @@ sample_stats <-
              "sdev_nC36" = "sdev_unbiased.permil"),
     by = "session"
   ) |>
+  # figure out which sdev to use for error calculation (largest)
   mutate(
     .by = c("session", "compound"),
     use_sdev = max(c(sdev_propagated, sdev_pooled, sdev_nC36))
   ) |>
   arrange(desc(session), compound)
-sample_stats
+sample_stats |> knitr::kable(d = 1)
 
-# calculate averages and error ranges
+# calculate averages and error ranges for the samples
+stdev_warning <- 3
 peak_table_summary <- 
   peak_table_calibrated |>
   filter(type != "standard", str_detect(compound, "BP")) |>
@@ -796,19 +795,38 @@ peak_table_summary <-
     .by = c("id1", "compound"),
     n_analyses_in_area_range = sum(in_area_range) |> as.integer(),
     n_analyses_not_in_range = sum(!in_area_range) |> as.integer(),
+    calibrated_d2H_sdev.permil = 
+      if_else(n_analyses_in_area_range > 1,
+              sd(calibrated_d2H.permil[in_area_range]) |>
+                calculate_unbiased_sd(sum(in_area_range)),
+              NA_real_
+      ),
     calibrated_d2H.permil = 
       if_else(n_analyses_in_area_range > 0,
         mean(calibrated_d2H.permil[in_area_range]),
         NA_real_
       )
   ) |> 
+  relocate("calibrated_d2H_sdev.permil", .after = "calibrated_d2H.permil") |>
   left_join(sample_stats |> filter(session == "all") |>
               select("compound", matches("sdev")), by = "compound") |>
+  # calculate standard error of the mean based on the sdev to use
   mutate(
     calibrated_d2H_sem.permil = 
       if_else(n_analyses_in_area_range > 0,
         use_sdev/sqrt(n_analyses_in_area_range),
         NA_real_
+      ),
+    .after = "calibrated_d2H_sdev.permil"
+  ) |> 
+  # raise flags if there are unexpected oddities
+  mutate(
+    warnings =
+      case_when(
+        n_analyses_in_area_range == 1 ~ "single measurement",
+        calibrated_d2H_sdev.permil > stdev_warning * use_sdev ~ 
+          sprintf("sample sd > %s used sd", stdev_warning),
+        TRUE ~ "none"
       )
   ) |>
   arrange(id1, compound)
@@ -849,10 +867,10 @@ plot_df |>
   geom_pointrange(
     data = peak_table_summary |> mutate(id1 = factor(id1)) |>
       filter(!is.na(calibrated_d2H.permil)),
-    map = aes(y = calibrated_d2H.permil,
+    map = aes(y = calibrated_d2H.permil, shape = warnings,
               ymin = calibrated_d2H.permil - calibrated_d2H_sem.permil,
               ymax = calibrated_d2H.permil + calibrated_d2H_sem.permil),
-    position = "jitter", size = 1, shape = 18
+    position = "jitter", size = 1
   ) +
   scale_x_continuous(
     breaks = plot_df$id1 |> levels() |> seq_along(), expand = c(0, 0.1),
