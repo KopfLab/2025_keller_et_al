@@ -824,101 +824,44 @@ export_to_excel(
 peak_table_summary |> head()
 ```
 
-
-
-
-# OTHER
-
-### Accuracy standard: nC36 (skip?)
+### Visualization
 
 ```{r}
-#| label: fig-calibration-accuracy
-#| fig-width: 6
+#| label: fig-s6-data-overview
+#| fig-width: 12
 #| fig-height: 6
+#| warning: false
+set.seed(123)
+plot_df <- 
+  peak_table_calibrated |>
+  semi_join(peak_table_summary, by = c("compound", "id1")) |>
+  filter(in_area_range) |>
+  mutate(id1 = factor(id1))
 
-# nC36 summary
-peak_table_calibrated |>
-  bind_rows(peak_table_calibrated |> mutate(session = "all")) |>
-  filter(compound == "nC36", in_area_range) |>
-  summarize(
-    .by = c("session", "known_d2H.permil"),
-    n = n(),
-    calib_mean.permil = mean(calibrated_d2H.permil),
-    unbiased_sd.permil = calculate_unbiased_sd(sd(calibrated_d2H.permil), n),
-    diff.permil = mean(residual.permil),
-    RMSE = sqrt(mean(residual.permil^2))
-  ) |>
-  knitr::kable(digits = 2)
-
-# visualize
-peak_table_calibrated |>
-  filter(compound == "nC36") |>
+plot_df |>
   ggplot() +
-  aes(area.Vs, residual.permil, 
-      ymin = residual.permil - calibrated_d2H_err.permil,
-      ymax = residual.permil + calibrated_d2H_err.permil,
-      color = session, shape = session
-    ) +
-  geom_hline(yintercept = 0, linetype = 2) +
-  geom_hline(
-    data = ~.x |> filter(in_area_range) |> 
-      summarize(.by = "session", y = mean(residual.permil)),
-    map = aes(yintercept = y, x = NULL, color = session), 
-    linetype = 1, linewidth = 0.5
+  aes(id1 |> as.integer(), calibrated_d2H.permil, color = compound,
+      ymin = calibrated_d2H.permil - calibrated_d2H_err.permil,
+      ymax = calibrated_d2H.permil + calibrated_d2H_err.permil) +
+  # individual measurements
+  geom_pointrange(position = "jitter", alpha = 0.3, map = aes(size = area.Vs)) +
+  # averages
+  geom_pointrange(
+    data = peak_table_summary |> mutate(id1 = factor(id1)) |>
+      filter(!is.na(calibrated_d2H.permil)),
+    map = aes(y = calibrated_d2H.permil,
+              ymin = calibrated_d2H.permil - calibrated_d2H_sem.permil,
+              ymax = calibrated_d2H.permil + calibrated_d2H_sem.permil),
+    position = "jitter", size = 1, shape = 18
   ) +
-  # data
-  geom_errorbar(data = ~.x |> filter(!in_area_range), width = 0, alpha = 0.5) +
-  geom_point(data = ~.x |> filter(!in_area_range), size = 4, alpha = 0.5) +
-  geom_errorbar(data = ~.x |> filter(in_area_range), width = 0) +
-  geom_point(data = ~.x |> filter(in_area_range), size = 4) +
-  # styling
-  labs(
-    x = "area 2 [Vs]",
-    y = expression("error ("*delta[calib] - delta[known]*") for accuracy standard(nC"[36]*")")
-  ) +
-  scale_x_log10(breaks = scales::breaks_log(8)) + 
-  scale_y_continuous(
-    labels = function(x) paste0(x, "\U2030"),
-    breaks = seq(-30, 30, by = 2.5)
+  scale_x_continuous(
+    breaks = plot_df$id1 |> levels() |> seq_along(), expand = c(0, 0.1),
+    labels = levels(plot_df$id1)
   ) +
   scale_color_brewer(palette = "Dark2") +
-  theme_figure(grid = FALSE) +
-  theme(legend.position = "bottom", legend.direction = "vertical") +
-  coord_cartesian(
-    xlim = peak_table_calibrated |>
-      filter(compound == "nC36") |>
-      filter(in_area_range) |> 
-      pull(area.Vs) |> extend_limits(mult = c(0.03, 0.3)),
-    ylim = peak_table_calibrated |>
-      filter(compound == "nC36") |>
-      filter(in_area_range) |> 
-      pull(residual.permil) |> extend_limits(mult = 0.2)
-  )
+  scale_size_continuous(range = c(0.1, 1)) +
+  theme_figure(axis_x_rotate = 90, grid = FALSE) +
+  theme(panel.grid.minor.x = element_line(linetype = 2)) +
+  labs(x = NULL, y = expression("calibrated "*delta^2*H~"[\U2030]"))
 ```
-
-### Error range (skip?)
-
-```{r}
-peak_table_calibrated |>
-  filter(in_area_range) |>
-  summarize(
-    .by = "session",
-    # FIXME: find a better way to expand the range
-    area.Vs = list(seq(min(area.Vs)^0.9, max(area.Vs)^1.1, length.out = 100)),
-    d2H.permil = list(seq(min(calibrated_d2H.permil), max(calibrated_d2H.permil), length.out = 100)),
-  ) |>
-  unnest("area.Vs") |> unnest("d2H.permil") |>
-  mutate(
-    .by = "session",
-    calibrated_d2H_sem.permil =
-      calculate_calibrated_d2H_se.permil(session[1], d2H.permil, area.Vs)
-  ) |>
-  ggplot() +
-  aes(area.Vs, d2H.permil, z = calibrated_d2H_sem.permil) +
-  geom_contour_filled() +
-  scale_x_log10(breaks = scales::breaks_log(8)) +
-  coord_cartesian(expand = FALSE) + 
-  facet_wrap(~session, scales = "free")
-```
-
 
