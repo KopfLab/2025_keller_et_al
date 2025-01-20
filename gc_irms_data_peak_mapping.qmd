@@ -427,7 +427,10 @@ peak_table <- iso_files |>
   ) |>
   iso_make_units_explicit(prefix = ".", suffix = "")
 
-# export
+# export for downstream processing
+peak_table |> arrow::write_parquet("data/combined_peak_table.parquet")
+
+# export for user viewing
 peak_table |> export_to_excel(file = "data/combined_peak_table.xlsx")
 ```
 
