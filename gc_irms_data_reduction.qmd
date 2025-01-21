@@ -190,6 +190,19 @@ $$
 
 This step entails calculating the analytical averages for sample compounds and their error estimates by evaluating propagated error from the calibration, pooled statistical error from the samples themselves, as well as unbiased standard deviation of the nC36 standard. Before this step it may be advisable to iterate back to Step 1 and re-run the calibration with an area limit if necessary as well as set the area range for where the calibration residuals are approximately zero.
 
+## Step 7: correct for derivatization/hydrogenation
+
+$$
+\begin{aligned}
+(nH_{original} + nH_{added}) \cdot \delta_x &= nH_{original} \cdot \delta_{corrected} + nH_{added} \cdot \delta_{added} \\
+\rightarrow \delta_{corrected} &= \left(1 + \frac{nH_{added}}{nH_{original}} \right) \cdot \delta_x - \frac{nH_{added}}{nH_{original}} \cdot \delta_{added} \\
+\rightarrow \sigma_{\delta_{corrected}} &= \sqrt{
+  \left(1 + \frac{nH_{added}}{nH_{original}} \right)^2 \cdot \sigma_x^2 + 
+   \left( \frac{nH_{added}}{nH_{original}} \right)^2 \cdot \sigma_{added}^2  
+}
+\end{aligned}
+$$
+
 # Load peak tables (*)
 
 This table is generated from multiple analytical sessions in `gc_irms_data_peak_mapping.qmd`.
@@ -207,7 +220,7 @@ area_limits <-
   tibble::tribble(
     ~session, ~area_limit.Vs,
     "2023-06", Inf,
-    "2024-06", 40
+    "2024-06", 42
   )
 area_limits |> knitr::kable()
 
@@ -544,7 +557,7 @@ calib_area_range <-
   tibble::tribble(
     ~session, ~area_calib_min.Vs, ~area_calib_max.Vs,
     "2023-06", 3,           40,
-    "2024-06", 3,           40
+    "2024-06", 3,           42
   )
 calib_area_range |> knitr::kable()
 
@@ -826,7 +839,7 @@ peak_table_summary <-
         n_analyses_in_area_range == 1 ~ "single measurement",
         calibrated_d2H_sdev.permil > stdev_warning * use_sdev ~ 
           sprintf("sample sd > %s used sd", stdev_warning),
-        TRUE ~ "none"
+        TRUE ~ NA_character_
       )
   ) |>
   arrange(id1, compound)
@@ -865,8 +878,12 @@ plot_df |>
   geom_pointrange(position = "jitter", alpha = 0.3, map = aes(size = area.Vs)) +
   # averages
   geom_pointrange(
-    data = peak_table_summary |> mutate(id1 = factor(id1)) |>
-      filter(!is.na(calibrated_d2H.permil)),
+    data = peak_table_summary |> 
+      filter(!is.na(calibrated_d2H.permil)) |>
+      mutate(id1 = factor(id1), warnings = factor(warnings) |> 
+               fct_na_value_to_level() |> 
+               fct_recode("none" = NA_character_) |>
+               fct_relevel("none")),
     map = aes(y = calibrated_d2H.permil, shape = warnings,
               ymin = calibrated_d2H.permil - calibrated_d2H_sem.permil,
               ymax = calibrated_d2H.permil + calibrated_d2H_sem.permil),
@@ -881,5 +898,61 @@ plot_df |>
   theme_figure(axis_x_rotate = 90, grid = FALSE) +
   theme(panel.grid.minor.x = element_line(linetype = 2)) +
   labs(x = NULL, y = expression("calibrated "*delta^2*H~"[\U2030]"))
+```
+
+## Step 7: correct for derivatization/hydrogenation
+
+
+$$
+\begin{aligned}
+(nH_{original} + nH_{added}) \cdot \delta_x &= nH_{original} \cdot \delta_{corrected} + nH_{added} \cdot \delta_{added} \\
+\rightarrow \delta_{corrected} &= \left(1 + \frac{nH_{added}}{nH_{original}} \right) \cdot \delta_x - \frac{nH_{added}}{nH_{original}} \cdot \delta_{added} \\
+\rightarrow \sigma_{\delta_{corrected}} &= \sqrt{
+  \left(1 + \frac{nH_{added}}{nH_{original}} \right)^2 \cdot \sigma_x^2 + 
+   \left( \frac{nH_{added}}{nH_{original}} \right)^2 \cdot \sigma_{added}^2  
+}
+\end{aligned}
+$$
+
+### Calculation(*)
+
+```{r}
+# from 18-O-18 tests with Pt+H2
+added_d2H.permil <- -676.32	
+added_d2H_sd.permil <- 134.39
+
+peak_table_summary_final <-
+  peak_table_summary |>
+  mutate(
+    nH_added = 2L,
+    nH_original = 80L - 2L * abs(as.integer(parse_number(compound))) - nH_added,
+    corrected_d2H.permil = (1 + nH_added/nH_original) * calibrated_d2H.permil - 
+      nH_added/nH_original * added_d2H.permil,
+    corrected_d2H_sem.permil = sqrt(
+      ((1 + nH_added/nH_original) * calibrated_d2H_sem.permil)^2 +
+      (nH_added/nH_original * added_d2H_sd.permil)^2
+    )
+  )
+
+# added uncertainty:
+peak_table_summary_final |> 
+  filter(!is.na(calibrated_d2H.permil))  |>
+  summarize(
+    added_d2H.permil = added_d2H.permil,
+    added_d2H_sd.permil = added_d2H_sd.permil,
+    d2H_change_min.permil = min(corrected_d2H.permil - calibrated_d2H.permil),
+    d2H_change_max.permil = max(corrected_d2H.permil - calibrated_d2H.permil),
+    d2H_sem_change_min.permil = min(corrected_d2H_sem.permil - calibrated_d2H_sem.permil),
+    d2H_sem_change_max.permil = max(corrected_d2H_sem.permil - calibrated_d2H_sem.permil)
+  ) |> 
+  pivot_longer(everything()) |>
+  knitr::kable(d=1)
+
+# export
+export_to_excel(
+  `analyses` = peak_table_calibrated,
+  `summary` = peak_table_summary_final,
+  file = "output/gc_irms_data_corrected.xlsx"
+)
 ```
 
