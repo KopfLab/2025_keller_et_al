@@ -96,7 +96,8 @@ iso_files_w_file_info <- iso_files_raw |>
   # process file information
   iso_mutate_file_info(
     # session information
-    session = "2023-06",
+    session = dirname(file_path) |> basename() |> 
+      str_extract("\\d{4}-\\d{2}"),
     # analysis as number
     analysis = as.integer(parse_number(Analysis)),
     # remove white spaces
