@@ -85,8 +85,8 @@ This mass balance has the following properties:
 
 > notation notes 
 
- - all $\delta_x$ values that do not have an explicit numerator ($\delta_{x/y}$) are vs. VSMOW
- - all $\delta$ values are implictly multiplied by 1000 when reported as \U2030 and must be divided by 1000 when in \U2030 before being used in equations
+ - all $\delta_x$ values that do not have an explicit denominator ($\delta_{x/y}$) are vs. VSMOW
+ - all $\delta$ values are implicitly multiplied by 1000 when reported as ‰ and must be divided by 1000 when in ‰ before being used in equations
 
 To figure out the 3 unknown constants, we can take the following approach: 
 
@@ -220,7 +220,7 @@ area_limits <-
   tibble::tribble(
     ~session, ~area_limit.Vs,
     "2023-06", Inf,
-    "2024-06", 42
+    "2024-06", 40
   )
 area_limits |> knitr::kable()
 
@@ -557,7 +557,7 @@ calib_area_range <-
   tibble::tribble(
     ~session, ~area_calib_min.Vs, ~area_calib_max.Vs,
     "2023-06", 3,           40,
-    "2024-06", 3,           42
+    "2024-06", 3,           40
   )
 calib_area_range |> knitr::kable()
 
@@ -801,23 +801,49 @@ sample_stats |> knitr::kable(d = 1)
 
 # calculate averages and error ranges for the samples
 stdev_warning <- 3
+add_warning <- function(warnings, condition, msg) {
+  case_when(
+    !is.na(warnings) & !is.na(condition) & condition ~ sprintf("%s + %s", warnings, msg),
+    !is.na(warnings) & (is.na(condition) | !condition) ~ warnings,
+    is.na(warnings) & !is.na(condition) & condition ~ msg,
+    TRUE ~ NA_character_,
+    .size = length(condition)
+  )
+}
+
+# summary
 peak_table_summary <- 
   peak_table_calibrated |>
   filter(type != "standard", str_detect(compound, "BP")) |>
   summarize(
     .by = c("id1", "compound"),
     n_analyses_in_area_range = sum(in_area_range) |> as.integer(),
-    n_analyses_not_in_range = sum(!in_area_range) |> as.integer(),
+    n_analyses_below_area_range = sum(area.Vs < area_calib_min.Vs) |> as.integer(),
+    n_analyses_above_area_range = sum(area.Vs > area_calib_max.Vs) |> as.integer(),
+    # calculate sdev
     calibrated_d2H_sdev.permil = 
-      if_else(n_analyses_in_area_range > 1,
-              sd(calibrated_d2H.permil[in_area_range]) |>
-                calculate_unbiased_sd(sum(in_area_range)),
-              NA_real_
+      case_when(
+        # more than 1 analysis in area range
+        n_analyses_in_area_range > 1 ~ 
+          sd(calibrated_d2H.permil[in_area_range]) |>
+          calculate_unbiased_sd(n_analyses_in_area_range),
+        # more than 1 analysis above area range
+        n_analyses_above_area_range > 1 ~
+          sd(calibrated_d2H.permil[area.Vs > area_calib_max.Vs]) |>
+          calculate_unbiased_sd(n_analyses_above_area_range),
+        # not enough to calculate sdev
+        TRUE ~ NA_real_
       ),
     calibrated_d2H.permil = 
-      if_else(n_analyses_in_area_range > 0,
-        mean(calibrated_d2H.permil[in_area_range]),
-        NA_real_
+      case_when(
+        # at least 1 analysis in area range
+        n_analyses_in_area_range > 0 ~ 
+          mean(calibrated_d2H.permil[in_area_range]),
+        # at least 1 analysis above area range
+        n_analyses_above_area_range > 0 ~
+          mean(calibrated_d2H.permil[area.Vs > area_calib_max.Vs]),
+        # all below area range (can't calculate safely)
+        TRUE ~ NA_real_
       )
   ) |> 
   relocate("calibrated_d2H_sdev.permil", .after = "calibrated_d2H.permil") |>
@@ -826,20 +852,30 @@ peak_table_summary <-
   # calculate standard error of the mean based on the sdev to use
   mutate(
     calibrated_d2H_sem.permil = 
-      if_else(n_analyses_in_area_range > 0,
-        use_sdev/sqrt(n_analyses_in_area_range),
-        NA_real_
+      case_when(
+        n_analyses_in_area_range > 0 ~ 
+          use_sdev/sqrt(n_analyses_in_area_range),
+        n_analyses_above_area_range > 0 ~
+          use_sdev/sqrt(n_analyses_above_area_range),
+        TRUE ~ NA_real_
       ),
     .after = "calibrated_d2H_sdev.permil"
   ) |> 
   # raise flags if there are unexpected oddities
   mutate(
-    warnings =
-      case_when(
-        n_analyses_in_area_range == 1 ~ "single measurement",
-        calibrated_d2H_sdev.permil > stdev_warning * use_sdev ~ 
-          sprintf("sample sd > %s used sd", stdev_warning),
-        TRUE ~ NA_character_
+    warnings = NA_character_ |>
+      add_warning(
+        n_analyses_in_area_range == 1 | 
+          (n_analyses_in_area_range == 0 & n_analyses_above_area_range == 1),
+        "single measurement"
+      ) |>
+      add_warning(
+        n_analyses_in_area_range == 0 & n_analyses_above_area_range > 0,
+        "above area range"
+      ) |>
+      add_warning(
+        calibrated_d2H_sdev.permil > stdev_warning * use_sdev,
+        sprintf("sample sd > %s used sd", stdev_warning)
       )
   ) |>
   arrange(id1, compound)
@@ -895,24 +931,13 @@ plot_df |>
   ) +
   scale_color_brewer(palette = "Dark2") +
   scale_size_continuous(range = c(0.1, 1)) +
+  scale_shape_manual(values = c(16:18, 15)) +
   theme_figure(axis_x_rotate = 90, grid = FALSE) +
   theme(panel.grid.minor.x = element_line(linetype = 2)) +
   labs(x = NULL, y = expression("calibrated "*delta^2*H~"[\U2030]"))
 ```
 
 ## Step 7: correct for derivatization/hydrogenation
-
-
-$$
-\begin{aligned}
-(nH_{original} + nH_{added}) \cdot \delta_x &= nH_{original} \cdot \delta_{corrected} + nH_{added} \cdot \delta_{added} \\
-\rightarrow \delta_{corrected} &= \left(1 + \frac{nH_{added}}{nH_{original}} \right) \cdot \delta_x - \frac{nH_{added}}{nH_{original}} \cdot \delta_{added} \\
-\rightarrow \sigma_{\delta_{corrected}} &= \sqrt{
-  \left(1 + \frac{nH_{added}}{nH_{original}} \right)^2 \cdot \sigma_x^2 + 
-   \left( \frac{nH_{added}}{nH_{original}} \right)^2 \cdot \sigma_{added}^2  
-}
-\end{aligned}
-$$
 
 ### Calculation(*)
 
@@ -925,7 +950,7 @@ peak_table_summary_final <-
   peak_table_summary |>
   mutate(
     nH_added = 2L,
-    nH_original = 80L - 2L * abs(as.integer(parse_number(compound))) - nH_added,
+    nH_original = 80L - 2L * abs(as.integer(parse_number(compound))),
     corrected_d2H.permil = (1 + nH_added/nH_original) * calibrated_d2H.permil - 
       nH_added/nH_original * added_d2H.permil,
     corrected_d2H_sem.permil = sqrt(

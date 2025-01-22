@@ -11,7 +11,7 @@ embed-resources: true
 output:
   html: 
     code-tools: true
-    code-fold: show
+    code-fold: true
     code-summary: "Show the code"
     toc-float: true
 knitr: 
@@ -128,6 +128,9 @@ iso_files_w_file_info <- iso_files_raw |>
     session, folder, analysis, file_datetime, id1, id2, type, 
     gc_method, as_pos, injection_volume, concentration)
 
+# overview of types
+iso_files_w_file_info |> iso_get_file_info() |> count(session, type) |> 
+  knitr::kable()
 ```
 
 ## First look at chromatograms
@@ -243,7 +246,8 @@ iso_files_w_file_info <- iso_files_raw |>
   # process file information
   iso_mutate_file_info(
     # session information
-    session = "2024-06",
+    session = dirname(file_path) |> basename() |> 
+      str_extract("\\d{4}-\\d{2}"),
     # analysis as number
     analysis = as.integer(parse_number(Analysis)),
     # remove white spaces
@@ -253,8 +257,8 @@ iso_files_w_file_info <- iso_files_raw |>
       id1 == "H3 F"                  ~ "linearity",
       str_detect(id1, "on off")      ~ "on/off",
       str_detect(id1, "A7")          ~ "standard",
-      str_detect(id1, "pre|post")    ~ "test",
-      str_detect(id1, "AC")          ~ "sample",
+      str_detect(id1, "AC") & !str_detect(id1, "pre|post")
+                                     ~ "sample",
       TRUE                           ~ "other"
     ),
     gc_method = str_extract(`GC Method`, "\\d+min"),
@@ -277,6 +281,10 @@ iso_files_w_file_info <- iso_files_raw |>
   iso_select_file_info(
     session, folder, analysis, file_datetime, id1, id2, type, rep,
     gc_method, as_pos, injection_volume, concentration)
+
+# overview of types
+iso_files_w_file_info |> iso_get_file_info() |> count(session, type) |> 
+  knitr::kable()
 ```
 
 ## First look at chromatograms
