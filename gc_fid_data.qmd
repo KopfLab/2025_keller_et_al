@@ -1,0 +1,236 @@
+---
+title: "Biphytane quantification from GC-FID"
+subtitle: "Katherine Keller's samples"
+author: "Sebastian Kopf"
+date: "`r format(Sys.Date(), '%d %b %Y')`"
+number-sections: true
+number-offset: 0
+toc: true
+toc-depth: 2
+fig-width: 7
+fig-height: 5
+df-print: tibble
+embed-resources: true
+format: 
+  html: 
+    code-tools: true
+    code-fold: show
+    code-summary: "Show the code"
+    toc-float: true
+  docx: 
+    toc-title: "Table of contents"
+    fig-dpi: 600
+    execute:
+      echo: false
+crossref:
+  fig-prefix: Fig.
+  tbl-prefix: Table
+  ref-hyperlink: true
+knitr: 
+  opts_chunk: 
+    fig.path: "plots/gc_fid-"
+    fig.keep: "all"
+    dev: ['png', 'pdf']
+    dev.args: 
+      pdf: 
+        encoding: 'WinAnsi'
+        useDingbats: false
+editor: source
+editor_options: 
+  chunk_output_type: console
+---
+
+# Setup
+
+Using `r R.version.string` , @R, and tidyverse version `r packageVersion("tidyverse")`, @tidyverse.
+
+```{r}
+#| label: setup
+#| message: false
+
+# load packages
+library(tidyverse)
+
+# load scripts
+source("scripts/table_functions.R")
+source("scripts/plotting_functions.R")
+```
+
+# Load Data
+
+```{r}
+# parse file names
+gc_raw_data <- 
+  tibble(
+    file_path = list.files("data/gc_fid_data", recursive = TRUE, pattern = ".*xls", full.names = TRUE),
+    file_name = basename(file_path),
+    file_id = purrr::map_chr(file_path, digest::digest),
+    fid_nr = str_extract(file_name, "FID\\d+"),
+    sample_id = str_extract(file_name, "S\\d+_(G|Cr)[^_]+")
+  ) |>
+  # read raw data
+  mutate(
+    data = map(file_path, ~{
+      suppressWarnings(readxl::read_xls(
+        .x, skip = 42, 
+        col_names = c("peak_nr", "compound", "rt.min", "area.pA_min", "height.pA", "rel_area", "rel_height", "amount"),
+        col_types = c("numeric", "text", "numeric", "numeric", rep("skip", 4))
+      ))
+    }),
+    n = map_int(data, nrow)
+  )
+
+# safety check about reading errors
+stopifnot(nrow(gc_raw_data %>% filter(n == 0)) == 0)
+
+# unnest
+gc_raw_data_unnested <-
+  gc_raw_data %>%
+  unnest(data) %>%
+  select(-file_name, -file_path, -n) %>%
+  filter(!is.na(peak_nr))
+```
+
+# Process Data
+
+```{r}
+# check sample list for expected compounds' abundances
+gc_expected <-
+  readxl::read_excel("data/samples.xlsx") |>
+  mutate(
+    PAIBE.ug = `PAIBE added (ug)`,
+    Squalane.ug = `Squalane added (ug)`,
+    # adjust 16O16
+    C16.ug = (32 * 14 + 4) / (32 * 14 + 2 + 16) * `16016 added (ug)`,
+    # adjust for iodine
+    C18.ug = (18 * 14 + 2) / (18 * 14 + 1 + 127) * `C18-I added(ug)`,
+    C34.ug = (34 * 14 + 2) / (34 * 14 + 1 + 127) * `C34-I added (ug)`
+  ) |>
+  select(sample_id, ends_with(".ug")) |>
+  pivot_longer(cols = ends_with(".ug"), values_to = "expected.ug", names_to = "compound") |>
+  mutate(compound = str_remove(compound, ".ug"))
+
+# combined
+gc_data <-
+  gc_raw_data_unnested |>
+  filter(sample_id %in% unique(gc_expected$sample_id)) |>
+  left_join(gc_expected, by = c("sample_id", "compound")) |>
+  group_by(file_id) |>
+  mutate(
+    amount.ug = area.pA_min/area.pA_min[compound == "PAIBE"] * expected.ug[compound == "PAIBE"],
+    yield = amount.ug/expected.ug
+  ) |>
+  ungroup() 
+
+# biphytane data
+gc_biphytanes <- 
+  gc_data |>
+  filter(str_detect(compound, "BP-\\d")) |>
+  group_by(file_id) |>
+  mutate(rel_abundance = amount.ug/sum(amount.ug)) |>
+  ungroup()
+```
+
+# Visualize
+
+## Yield of added compounds
+
+```{r}
+#| label: fig-yield
+#| fig-width: 10
+#| fig-height: 5
+gc_data |>
+  filter(!is.na(yield), compound != "PAIBE") |>
+  mutate(
+    compound = factor(compound) |>
+      fct_recode(
+        "C16 from 16-O-16" = "C16",
+        "C18 from 18-I" = "C18",
+        "C34 from 34-I" = "C34"
+      )
+  ) |>
+  ggplot() + 
+  aes(sample_id, yield, fill = compound) +
+  geom_col(position = position_dodge2(width = 0.9, preserve = "single"))  +
+  scale_y_continuous(labels = scales::label_percent(), expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Set1") +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_figure(axis_x_rotate = 90) 
+```
+
+## Relative abundance of biphytanes
+
+```{r}
+#| label: fig-bp-rel-abundance
+#| fig-width: 9
+#| fig-height: 6
+gc_biphytanes |>
+  left_join(
+    readxl::read_excel("data/samples.xlsx") |> select(sample_id, sample, fraction),
+    by = "sample_id"
+  ) |>
+  arrange(parse_number(sample)) |>
+  mutate(
+    sample = as_factor(sample),
+    compound = factor(compound) |>
+      fct_recode("BP-4?" = "BP-4")
+  ) |>
+  ggplot() + 
+  aes(sample, rel_abundance, fill = compound) +
+  geom_col(position = position_dodge2(width = 0.9, preserve = "single")) +
+  facet_wrap(~fraction) +
+  scale_y_continuous(labels = scales::label_percent(), expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Set1") +
+  coord_cartesian(ylim = c(0, 1)) +
+  theme_figure() +
+  theme(legend.position = "bottom")
+```
+
+## Total abundance of biphytanes
+
+```{r}
+#| label: fig-bp-abundance
+#| fig-width: 9
+#| fig-height: 6
+gc_biphytanes |>
+  left_join(
+    readxl::read_excel("data/samples.xlsx") |> select(sample_id, sample, fraction),
+    by = "sample_id"
+  ) |>
+  arrange(parse_number(sample)) |>
+  mutate(
+    sample = as_factor(sample),
+    compound = factor(compound) |>
+      fct_recode("BP-4?" = "BP-4")
+  ) |>
+  ggplot() + 
+  aes(sample, amount.ug, fill = compound) +
+  geom_col(position = position_dodge2(width = 0.9, preserve = "single")) +
+  facet_wrap(~fraction) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_brewer(palette = "Set1") +
+  coord_cartesian(ylim = c(0, 6)) +
+  theme_figure() +
+  theme(legend.position = "bottom")
+```
+
+
+# Summary
+
+```{r}
+gc_data_summary <- 
+  gc_data |>
+  select(file_id, sample_id, compound, amount.ug) |>
+  mutate(compound = paste0(compound, ".ug")) |>
+  pivot_wider(names_from = compound, values_from = amount.ug) 
+  
+gc_data_summary
+```
+
+# Export
+
+```{r}
+# export
+gc_biphytanes |> select(-"file_id") |> export_to_excel(file = "output/sample_quantification.xlsx")
+```
+
