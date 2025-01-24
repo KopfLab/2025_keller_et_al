@@ -1,7 +1,6 @@
 ---
 title: "Biphytane quantification from GC-FID"
 subtitle: "Katherine Keller's samples"
-author: "Sebastian Kopf"
 date: "`r format(Sys.Date(), '%d %b %Y')`"
 number-sections: true
 number-offset: 0
@@ -59,6 +58,7 @@ source("scripts/plotting_functions.R")
 # Load Data
 
 ```{r}
+#| eval: false
 # parse file names
 gc_raw_data <- 
   tibble(
@@ -89,7 +89,16 @@ gc_raw_data_unnested <-
   unnest(data) %>%
   select(-file_name, -file_path, -n) %>%
   filter(!is.na(peak_nr))
+
+# save
+gc_raw_data_unnested |>
+  export_to_excel(file = "data/gc_fid_data.xlsx")
 ```
+
+```{r}
+gc_raw_data_unnested <- readxl::read_excel("data/gc_fid_data.xlsx")
+```
+
 
 # Process Data
 
