@@ -67,9 +67,9 @@ $$
 \begin{aligned}
 \frac{R_{peak}}{R_{H_2}} 
   &=\frac{A_{x}}{A_{peak}}\cdot\frac{R_{analyte}}{R_{H_2}}+\frac{A_{bgrd}}{A_{peak}}\cdot\frac{R_{blank}}{R_{H_2}} \\
-  &= \left( \frac{1 - A_{bgrd}}{A_{peak}}\cdot\frac{R_{analyte}}{R_{VSMOW}} 
+  &= \left( \frac{A_{peak} - A_{bgrd}}{A_{peak}}\cdot\frac{R_{analyte}}{R_{VSMOW}} 
   + \frac{A_{bgrd}}{A_{peak}}\cdot\frac{R_{blank}}{R_{VSMOW}} \right) \cdot{} \frac{R_{VSMOW}}{R_{H_2}} \\
-\delta_{peak/H_2}  &= \left( \frac{1 - A_{bgrd}}{A_{peak}}\cdot (\delta_x + 1)
+\delta_{peak/H_2}  &= \left( \left( 1 - \frac{A_{bgrd}}{A_{peak}} \right) \cdot (\delta_x + 1)
   + \frac{A_{bgrd}}{A_{peak}}\cdot (\delta_{bgrd} + 1) \right) \cdot\frac{R_{VSMOW}}{R_{H_2}} - 1 \\
 \end{aligned}
 $$
@@ -160,7 +160,11 @@ $$
 \end{aligned}
 $$
 
-## Step 5: apply calibration
+## Step 5: non-linear-least squares
+
+Uses the parameters determined in steps 1-4 as starting values for a non-linear least squares fit of the mass balance equation with standards in the area range of interest (the smaller the range, the better the fit) to refine the parameter values for your calibration.
+
+## Step 6: apply calibration
 
 Solve the mass balance for $\delta_x$ ($\delta_{analyte/VSMOW}$) and calculate the calibration error $\sigma_{\delta_x}$ by standard error propagation:
 
@@ -186,11 +190,11 @@ $$
 \end{aligned}
 $$
 
-## Step 6: calculate averages and errors
+## Step 7: calculate averages and errors
 
 This step entails calculating the analytical averages for sample compounds and their error estimates by evaluating propagated error from the calibration, pooled statistical error from the samples themselves, as well as unbiased standard deviation of the nC36 standard. Before this step it may be advisable to iterate back to Step 1 and re-run the calibration with an area limit if necessary as well as set the area range for where the calibration residuals are approximately zero.
 
-## Step 7: correct for derivatization/hydrogenation
+## Step 8: correct for derivatization/hydrogenation
 
 $$
 \begin{aligned}
@@ -340,6 +344,7 @@ each_cmp_params <-
 # what then is the ref gas uncertainty? (Polissar & d'Andrea)
 refH2 <- 
   each_cmp_params |>
+  bind_rows(each_cmp_params |> mutate(session = "all")) |>
   summarise(
     .by = "session",
     # sem based on the means of the sds
@@ -371,6 +376,7 @@ refH2 |> knitr::kable(d = 1)
 # visualize
 set.seed(123)
 each_cmp_params |>
+  filter(session != "all") |>
   ggplot() +
   aes(x = compound, y = d2H_H2.permil, 
       color = session, shape = session,
@@ -378,12 +384,14 @@ each_cmp_params |>
       ymax = d2H_H2.permil + d2H_H2_sem.permil) + 
   # mean
   geom_hline(
-    data = refH2, 
+    data = refH2 |> filter(session != "all"), 
     map = aes(yintercept = d_H2_v.permil, color = session, linetype = "mean")
   ) +
   # error ranges
   geom_hline(
-    data = refH2 |> pivot_longer(matches("sem|sd")) |>
+    data = refH2 |> 
+      filter(session != "all") |>
+      pivot_longer(matches("sem|sd")) |>
       crossing(pm = c(-1, 1)) |>
       mutate(
         name = str_extract(name, "sem|sd"),
@@ -527,6 +535,7 @@ all_parameters |> knitr::kable(d = 3)
 
 # visualize all parameters
 all_parameters |>
+  filter(session != "all") |>
   pivot_longer(
     -"session", names_to = c("parameter", ".value", "units"),
     names_pattern = "([^_]+_[^_]+)_([^.]+)\\.(.*)") |>
@@ -544,12 +553,13 @@ all_parameters |>
   labs(x = NULL, y = NULL)
 ```
 
-## Step 5: apply calibration
+
+## Step 5: non-linear-least squares
 
 ### Calculation (*)
 
 ```{r}
-#| label: calc-s5-calibrated-data
+#| label: calc-s5-nls-fit
 
 # use this area range for where to apply the calibration, will use
 # the cloesest larger/smaller to these values from the calibration
@@ -561,41 +571,112 @@ calib_area_range <-
   )
 calib_area_range |> knitr::kable()
 
-# calculate calibrated d2H
-calculate_calibrated_d2H.permil <- function(session, d_vs_ref_gas.permil, area.Vs, params = all_parameters) {
-  params |> 
-    filter(session == !!session) |>
-    with({
-      area.Vs/(area.Vs - A_bgrd_v.Vs) * 
-        (d_vs_ref_gas.permil + d_H2_v.permil + d_vs_ref_gas.permil * d_H2_v.permil/1000) -
-        A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_v.permil
-    })
-}
+# fit to model of the calibration
+nls_parameters <-
+  all_parameters |>
+  filter(session != "all") |>
+  left_join(
+    peak_table_for_calib |> 
+      # calibration peaks
+      filter(use_to_calibrate) |>
+      # only in relevant area range
+      left_join(calib_area_range, by = "session") |>
+      filter(area.Vs >= area_calib_min.Vs & area.Vs <= area_calib_max.Vs) |>
+      nest(data = -c("session")),
+    by = "session"
+  ) |>
+  mutate(
+    .by = "session",
+    coefs = 
+      nls(
+        known_d2H.permil ~
+          area.Vs/(area.Vs - A_bgrd.Vs) *
+          (d2H_vs_H2.permil + d_H2.permil + d2H_vs_H2.permil * d_H2.permil/1000) -
+          A_bgrd.Vs/(area.Vs - A_bgrd.Vs) * d_bgrd.permil,
+        # data set
+        data = data[[1]],
+        start =
+          c(
+            d_H2.permil = d_H2_v.permil,
+            A_bgrd.Vs = A_bgrd_v.Vs,
+            d_bgrd.permil = d_bgrd_v.permil
+          )
+        #lower = rep(0.1, nrow(norm_factors) - 1L) |> setNames(norm_factors$`Raw file`[-1]),
+        #algorithm = "lmaccel" # this is a little faster than plain old "lm" but has the same result
+        #algorithm = "plinear"
+      ) |> summary() |> 
+      coefficients() |> as.data.frame() |> 
+      rownames_to_column() |> as_tibble() |> list()
+  ) |>
+  select("session", "coefs") |> unnest("coefs") |>
+  select("session", "term" = "rowname", v = Estimate, err = "Std. Error") |> 
+  pivot_wider(
+    names_from = term, values_from = c(v, err), 
+    names_glue = "{gsub('\\\\..*', '', term)}_{.value}{gsub('^[^.]*', '', term)}"
+  )
 
-# calculate calibrated d2H se
-calculate_calibrated_d2H_se.permil <- function(session, d_vs_ref_gas.permil, area.Vs, params = all_parameters) {
-  params |> 
-    filter(session == !!session) |>
-    with({
-      sqrt(
-        (area.Vs/(area.Vs - A_bgrd_v.Vs) * (1 + d_vs_ref_gas.permil/1000) * d_H2_err.permil)^2 +
-          (A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_err.permil)^2 +
-          (area.Vs/(area.Vs - A_bgrd_v.Vs)^2 * area.Vs *
-             (d_vs_ref_gas.permil + d_H2_v.permil + d_vs_ref_gas.permil * d_H2_v.permil/1000 + d_bgrd_v.permil) *
-             A_bgrd_err.Vs)^2
-      )
-    })
-}
+# combined parameters
+combined_parameters <- 
+  all_parameters |> mutate(fit = "lms", .after = 1L) |>
+  bind_rows(nls_parameters |> mutate(fit = "nls")) |>
+  arrange(session, fit)
 
+combined_parameters |> knitr::kable(d = 3)
+```
+
+
+### Visualization
+
+```{r}
+#| label: fig-s5-params-nls-vs-lm
+#| fig-width: 12
+#| fig-height: 4
+
+# visualize all parameters
+combined_parameters |>
+  filter(session != "all") |>
+  pivot_longer(
+    c(-"session", -"fit"), names_to = c("parameter", ".value", "units"),
+    names_pattern = "([^_]+_[^_]+)_([^.]+)\\.(.*)") |>
+  pivot_wider(
+    names_from = "fit",
+    values_from = c("v", "err")
+  ) |>
+  mutate(
+    panel = sprintf("%s [%s]", parameter, units) |> as_factor(),
+  ) |>
+  ggplot() +
+  aes(v_lms,  y = v_nls, 
+      xmin = v_lms - err_lms, xmax = v_lms + err_lms,
+      ymin = v_nls - err_nls, ymax = v_nls + err_nls,
+     color = session) +
+  geom_abline(color = "black", linetype = 2) +
+  geom_errorbarh(height = 0) + geom_errorbar(width = 0) +
+  geom_point(size = 3) +
+  scale_color_brewer(palette = "Dark2") +
+  facet_wrap(.~panel, scales = "free") +
+  theme_figure(grid = FALSE) +
+  theme(panel.spacing.x = unit(0.05, "npc")) +
+  labs(x = "sequential linear least squares", y = "non-linear least square")
+```
+
+
+## Step 6: apply calibration
+
+### Calculation (*)
+
+```{r}
+#| label: calc-s6-calibrated-data
 # run the processing pipeline
-# Q/FIXME: merge in all parameters always so its part of the data frame? probably YES
 peak_table_calibrated <- 
   peak_table_for_calib |>
   filter(!is.na(compound), !is.na(d2H_vs_H2.permil)) |> 
   left_join(calib_area_range, by = "session") |>
+  left_join(combined_parameters, by = "session",
+            relationship = "many-to-many") |>
   # this step is ONLY needed for correction without area consideration!
   mutate(
-    .by = c("session", "compound"),
+    .by = c("session", "fit", "compound"),
     d_H2_direct.permil = 
       mean(
       (known_d2H.permil[use_to_calibrate] + 1000) / 
@@ -604,14 +685,22 @@ peak_table_calibrated <-
   ) |>
   # regular calculations
   mutate(
-    .by = "session",
+    .by = c("session", "fit"),
     area_calib_min.Vs = min(area.Vs[use_to_calibrate & area.Vs >= area_calib_min.Vs]),
     area_calib_max.Vs = max(area.Vs[use_to_calibrate & area.Vs <= area_calib_max.Vs]),
     in_area_range = area.Vs >= area_calib_min.Vs & area.Vs <= area_calib_max.Vs,
     calibrated_d2H.permil = 
-      calculate_calibrated_d2H.permil(session[1], d2H_vs_H2.permil, area.Vs),
+       area.Vs/(area.Vs - A_bgrd_v.Vs) * 
+        (d2H_vs_H2.permil + d_H2_v.permil + d2H_vs_H2.permil * d_H2_v.permil/1000) -
+        A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_v.permil,
     calibrated_d2H_err.permil =
-      calculate_calibrated_d2H_se.permil(session[1], d2H_vs_H2.permil, area.Vs),
+      sqrt(
+        (area.Vs/(area.Vs - A_bgrd_v.Vs) * (1 + d2H_vs_H2.permil/1000) * d_H2_err.permil)^2 +
+          (A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_err.permil)^2 +
+          (area.Vs/(area.Vs - A_bgrd_v.Vs)^2 * area.Vs *
+             (d2H_vs_H2.permil + d_H2_v.permil + d2H_vs_H2.permil * d_H2_v.permil/1000 + d_bgrd_v.permil) *
+             A_bgrd_err.Vs)^2
+      ),
     residual.permil = if_else(
       !is.na(known_d2H.permil),
       calibrated_d2H.permil - known_d2H.permil,
@@ -631,12 +720,17 @@ stopifnot("area range has missing sessions" =
 calib_stats <- 
   peak_table_calibrated |>
   bind_rows(peak_table_calibrated |> mutate(session = "all")) |>
-  filter(use_to_calibrate) |>
+  filter(use_to_calibrate, in_area_range) |>
   summarize(
-    .by = "session",
+    .by = c("session", "fit"),
     n_analyses = unique(file_id) |> length(),
     n_std_peaks = n(), 
-    RMSE.permil = sqrt(mean(residual.permil^2))
+    area_actual_min.Vs = min(area.Vs),
+    area_actual_max.Vs = max(area.Vs),
+    RMSE.permil = sqrt(mean(residual.permil^2)),
+    resid_mean.permil = mean(residual.permil),
+    resid_min.permil = min(residual.permil),
+    resid_max.permil = max(residual.permil)
   )
 calib_stats |> knitr::kable(d = 1)
 ```
@@ -644,14 +738,18 @@ calib_stats |> knitr::kable(d = 1)
 ### Visualization
 
 ```{r}
-#| label: fig-calibration-residuals-and-range
+#| label: fig-s6-calibration-residuals-and-range
 #| fig-width: 12
 #| fig-height: 8
-#| 
+
 # evaluate residuals
+compounds <- "BP"
+resid_range.permil <- c(-20, 20) # what range to show
+
 peak_table_calibrated |>
   # what to show?
-  filter(type == "standard" | str_detect(compound, "BP")) |>
+  filter(type == "standard" | str_detect(compound, !!compounds)) |>
+  #filter(area.Vs > 2, area.Vs < 150) |>
   # how to render the y-facets 
   mutate(
     panel_y = type |> paste("distribution [#]") |> factor() |> 
@@ -684,19 +782,23 @@ peak_table_calibrated |>
       filter(str_detect(panel_y, "standard")),
     map = aes(yintercept = 0), show.legend = FALSE, linetype = 2
   ) +
-  geom_errorbar(
-    data = ~.x |> filter(is_standard), 
-    map = aes(y = residual.permil, ymin = residual.permil-calibrated_d2H_err.permil,
-              ymax = residual.permil+calibrated_d2H_err.permil), 
-    width = 0, alpha = 0.2
-  ) +
+  # geom_errorbar(
+  #   data = ~.x |> filter(is_standard), 
+  #   map = aes(y = residual.permil, ymin = residual.permil-calibrated_d2H_err.permil,
+  #             ymax = residual.permil+calibrated_d2H_err.permil), 
+  #   width = 0, alpha = 0.2
+  # ) +
   geom_point(
-    data = ~.x |> filter(is_standard, in_area_range), 
-    map = aes(y = residual.permil),
+    data = ~.x |> filter(is_standard, in_area_range, 
+                         residual.permil >= resid_range.permil[1],
+                         residual.permil <= resid_range.permil[2]), 
+    map = aes(y = residual.permil, color = known_d2H.permil > -150),
     alpha = 1
   ) + 
   geom_point(
-    data = ~.x |> filter(is_standard, !in_area_range), 
+    data = ~.x |> filter(is_standard, !in_area_range, 
+                         residual.permil >= resid_range.permil[1],
+                         residual.permil <= resid_range.permil[2]), 
     map = aes(y = residual.permil), alpha = 0.3
   ) + 
   # spread of residuals
@@ -706,21 +808,21 @@ peak_table_calibrated |>
     method = "loess", formula = y ~ x,
     color = "green2", linetype = 1
   ) +
-  facet_grid(panel_y ~ session, scales = "free", switch = "y") +
+  facet_grid(panel_y ~ session + fit, scales = "free", switch = "y") +
   scale_x_log10(breaks = scales::breaks_log(8)) +
-  scale_color_brewer(palette = "Dark2") +
+  #scale_color_brewer(palette = "Dark2") +
   theme_figure(grid = FALSE) +
   theme(
     legend.position = "top", legend.direction = "horizontal",
     strip.background.y = element_blank(), strip.placement = "outside"
   ) +
-  labs(x = "area [Vs]", y = NULL, color = NULL)
+  labs(x = "area [Vs]", y = NULL, color = NULL) 
 ```
 
 ### Without area correction
 
 ```{r}
-#| label: fig-calibration-residuals-and-range-no-area-corr
+#| label: fig-s6-calibration-residuals-and-range-no-area-corr
 #| fig-width: 12
 #| fig-height: 8
 ggplot2::last_plot() +
