@@ -693,11 +693,11 @@ peak_table_calibrated <-
        area.Vs/(area.Vs - A_bgrd_v.Vs) * 
         (d2H_vs_H2.permil + d_H2_v.permil + d2H_vs_H2.permil * d_H2_v.permil/1000) -
         A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_v.permil,
-    calibrated_d2H_err.permil =
+   calibrated_d2H_err.permil =
       sqrt(
         (area.Vs/(area.Vs - A_bgrd_v.Vs) * (1 + d2H_vs_H2.permil/1000) * d_H2_err.permil)^2 +
           (A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_err.permil)^2 +
-          (area.Vs/(area.Vs - A_bgrd_v.Vs)^2 * area.Vs *
+          (area.Vs/(area.Vs - A_bgrd_v.Vs)^2 * 
              (d2H_vs_H2.permil + d_H2_v.permil + d2H_vs_H2.permil * d_H2_v.permil/1000 + d_bgrd_v.permil) *
              A_bgrd_err.Vs)^2
       ),

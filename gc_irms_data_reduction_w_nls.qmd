@@ -428,84 +428,6 @@ each_std_reg |>
 ```
 
 
-### Visualization (is this useful?)
-
-```{r}
-# resulting bgrd and d_H2 estimates
-each_std_params <- 
-  each_std_reg |>
-  filter(.by = "session", n_peaks == max(n_peaks)) |>
-  summarize(
-    .by = "session",
-    n_stds = n(),
-    n_peaks = max(n_peaks),
-    coefs = 
-      nls(b1_v ~ 1/(d2H_H2.permil/1000 + 1) 
-          - 1/(d2H_H2.permil/1000 + 1) * A_bgrd.Vs/area_mean.Vs,
-          start = list(d2H_H2.permil = 0, A_bgrd.Vs = 0)) |> 
-      broom::tidy() |> list()
-  ) |> unnest("coefs") |>
-  select(-"statistic", -"p.value") |>
-  rename(v = "estimate", sem = "std.error") |>
-  pivot_wider(
-    names_from = term, values_from = c(v, sem), 
-    names_glue = "{gsub('\\\\..*', '', term)}_{.value}{gsub('^[^.]*', '', term)}"
-  )
-
-each_std_params |> knitr::kable(d = 3)
-```
-
-
-
-```{r}
-breaks <- c(20, 10, 7, 5:1)
-
-each_std_reg |> 
-  filter(n_peaks == max(n_peaks)) |>
-  left_join(each_std_params, by = "session") |>
-  mutate(
-    label = sprintf(
-      "%s\nδH2: %s\U00B1%s\U2030\nbgrd: %s\U00B1%sVs",
-      session, round(d2H_H2_v.permil, 1), round(d2H_H2_sem.permil, 1),
-      round(A_bgrd_v.Vs, 3), round(A_bgrd_sem.Vs, 3))
-  ) |>
-  ggplot() +
-  aes(x = 1/area_mean.Vs, y = b1_v,
-      #y = residual, 
-      color = label) +
-  geom_abline(
-    data = ~.x |>
-      summarize(.by = "label", icept = 1/(d2H_H2_v.permil[1]/1000 + 1), 
-                slope = - A_bgrd_v.Vs[1]/(d2H_H2_v.permil[1]/1000 + 1)) |>
-      distinct(),
-    map = aes(intercept = icept, slope = slope, color = label),
-    linewidth = 1.5
-  ) +
-  geom_errorbar(
-    map = aes(ymin = b1_v - b1_sem, ymax = b1_v + b1_sem), width = 0,
-    alpha = 0.2, show.legend = FALSE
-  ) +
-  geom_errorbarh(
-    map = aes(xmin = 1/(area_mean.Vs - area_sd.Vs),
-              xmax = 1/(area_mean.Vs + area_sd.Vs)), 
-    height = 0, alpha = 0.2, show.legend = FALSE
-  ) +
-  geom_point(size = 2, alpha = 1) +
-  scale_x_log10() +
-  scale_x_continuous(
-    breaks = scales::breaks_pretty(8),
-    sec.axis = sec_axis(
-      transform = ~1/.x,
-      breaks = breaks
-    )
-  ) +
-  scale_color_brewer(palette = "Dark2") +
-  theme_figure() +
-  theme(legend.key.spacing.y = unit(0.2, "npc")) +
-  labs(color = NULL, x = "area [Vs]", y = expression(beta[1]))
-```
-
-
 ## Step 1: $\delta_{peak/H_2} = \beta_0 + \beta_1 / A_{peak}$
 
 ### Calculation (*)
@@ -940,7 +862,7 @@ peak_table_calibrated <-
       sqrt(
         (area.Vs/(area.Vs - A_bgrd_v.Vs) * (1 + d2H_vs_H2.permil/1000) * d_H2_err.permil)^2 +
           (A_bgrd_v.Vs/(area.Vs - A_bgrd_v.Vs) * d_bgrd_err.permil)^2 +
-          (area.Vs/(area.Vs - A_bgrd_v.Vs)^2 * area.Vs *
+          (area.Vs/(area.Vs - A_bgrd_v.Vs)^2 * 
              (d2H_vs_H2.permil + d_H2_v.permil + d2H_vs_H2.permil * d_H2_v.permil/1000 + d_bgrd_v.permil) *
              A_bgrd_err.Vs)^2
       ),
