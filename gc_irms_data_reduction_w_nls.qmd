@@ -1,6 +1,6 @@
 ---
 title: "Data reduction of biphytane d2H measurements"
-subtitle: "Katherine Keller/Amanda Calhoun's analytical runs"
+subtitle: "experimental testing"
 date: "`r format(Sys.Date(), '%d %b %Y')`"
 number-sections: true
 number-offset: 0
@@ -57,7 +57,8 @@ source("scripts/table_functions.R")
 source("scripts/plotting_functions.R")
 ```
 
-# NOT USED: non nls approach used!
+# IMPORTANT: experimental, non-nls approach is sufficient
+
 > Note: the first code block in sections marked with (*) are essential, everything else is additional plotting and/or analysis to explore the data.
 
 # Approach
